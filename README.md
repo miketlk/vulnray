@@ -1,4 +1,4 @@
-# VulnLLM Local Code Vulnerability Scanner (MVP)
+# Vulnray Local Code Vulnerability Scanner (MVP)
 
 Local-first CLI vulnerability scanner for embedded C codebases.
 
@@ -14,13 +14,13 @@ pip install -e .
 ## Usage
 
 ```bash
-vulnllm-scan . --model ./models/VulnLLM-R-7B.Q4_K_M.gguf --output json,csv,md
+vulnray . --model ./models/VulnLLM-R-7B.Q4_K_M.gguf --output json,csv,md
 ```
 
 LLM inference benchmark mode (skips scanning/files and exits after stats):
 
 ```bash
-vulnllm-scan . --model ./models/VulnLLM-R-7B.Q4_K_M.gguf --llm-inference-test
+vulnray . --model ./models/VulnLLM-R-7B.Q4_K_M.gguf --llm-inference-test
 ```
 
 ## Config precedence

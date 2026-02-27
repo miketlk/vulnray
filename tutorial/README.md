@@ -1,6 +1,6 @@
-# VulnLLM Tutorial
+# Vulnray Tutorial
 
-This tutorial shows how to run `vulnllm-scan` against a small C project and generate all supported report formats.
+This tutorial shows how to run `vulnray` against a small C project and generate all supported report formats.
 
 ## 1. Tutorial contents
 
@@ -23,7 +23,7 @@ From repository root:
 
 ```bash
 python -m pip install -e .
-vulnllm-scan tutorial/test_project --config tutorial/vulnllm.toml
+vulnray tutorial/test_project --config tutorial/vulnllm.toml
 ```
 
 Notes:

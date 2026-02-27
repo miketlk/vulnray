@@ -48,7 +48,7 @@ def test_progress_prints_during_multipass(monkeypatch, tmp_path: Path, capsys):
         sys,
         "argv",
         [
-            "vulnllm-scan",
+            "vulnray",
             str(tmp_path),
             "--lang",
             "c",
@@ -99,7 +99,7 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
         sys,
         "argv",
         [
-            "vulnllm-scan",
+            "vulnray",
             str(tmp_path),
             "--lang",
             "c",
@@ -142,7 +142,7 @@ def test_dry_run_prints_files_without_inference(monkeypatch, tmp_path: Path, cap
         sys,
         "argv",
         [
-            "vulnllm-scan",
+            "vulnray",
             str(tmp_path),
             "--dry-run",
             "--lang",
@@ -190,7 +190,7 @@ def test_llm_inference_test_ignores_scan_path_and_reports_metrics(monkeypatch, t
         sys,
         "argv",
         [
-            "vulnllm-scan",
+            "vulnray",
             str(tmp_path / "does_not_matter"),
             "--model",
             str(model),

@@ -25,7 +25,7 @@ def test_tutorial_command_generates_all_reports_with_python_backend(monkeypatch,
         sys,
         "argv",
         [
-            "vulnllm-scan",
+            "vulnray",
             "tutorial/test_project",
             "--config",
             "tutorial/vulnllm.toml",

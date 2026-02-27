@@ -39,7 +39,7 @@ def init_json_report(
 ) -> None:
     report = {
         "scan_metadata": {
-            "tool": "vulnllm-scan",
+            "tool": "vulnray",
             "model": cfg.inference.model,
             "mode": cfg.scan.mode,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -78,7 +78,7 @@ def write_json_report(
 ) -> None:
     report = {
         "scan_metadata": {
-            "tool": "vulnllm-scan",
+            "tool": "vulnray",
             "model": cfg.inference.model,
             "mode": cfg.scan.mode,
             "timestamp": datetime.now(timezone.utc).isoformat(),

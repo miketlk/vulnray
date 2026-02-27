@@ -115,7 +115,7 @@ class Config:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="vulnllm-scan", description="Local LLM vulnerability scanner")
+    p = argparse.ArgumentParser(prog="vulnray", description="Local LLM vulnerability scanner")
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("--config", dest="config_path")
     p.add_argument("--dry-run", action="store_true", help="Print matched files and exit")
