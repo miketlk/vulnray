@@ -30,6 +30,36 @@ def _finding_to_json_item(f: Finding, include_reasoning: bool = True) -> dict:
     return item
 
 
+def _last_non_whitespace_char(path: Path) -> str:
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        pos = f.tell()
+        while pos > 0:
+            size = min(4096, pos)
+            pos -= size
+            f.seek(pos)
+            chunk = f.read(size)
+            for b in reversed(chunk):
+                ch = chr(b)
+                if not ch.isspace():
+                    return ch
+    return ""
+
+
+def _indent_lines(text: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(prefix + line for line in text.splitlines())
+
+
+def _strip_final_summary_if_present(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    marker = '\n  ],\n  "summary":'
+    idx = text.rfind(marker)
+    if idx == -1:
+        return
+    path.write_text(text[:idx], encoding="utf-8")
+
+
 def init_json_report(
     path: Path,
     cfg: Config,
@@ -37,34 +67,50 @@ def init_json_report(
     files_scanned: int,
     chunks_analyzed: int,
 ) -> None:
-    report = {
-        "scan_metadata": {
-            "tool": "vulnray",
-            "model": cfg.inference.model,
-            "mode": cfg.scan.mode,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "repo_root": repo_root,
-            "total_files_scanned": files_scanned,
-            "total_chunks_analyzed": chunks_analyzed,
-        },
-        "summary": build_summary([]),
-        "findings": [],
+    scan_metadata = {
+        "tool": "vulnray",
+        "model": cfg.inference.model,
+        "mode": cfg.scan.mode,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "repo_root": repo_root,
+        "total_files_scanned": files_scanned,
+        "total_chunks_analyzed": chunks_analyzed,
     }
-    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    metadata_lines = json.dumps(scan_metadata, indent=2).splitlines()
+    lines = ['{', '  "scan_metadata": {']
+    for line in metadata_lines[1:-1]:
+        lines.append(f"  {line}")
+    lines.extend(['  },', '  "findings": ['])
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def append_json_finding(path: Path, finding: Finding, *, include_reasoning: bool = True) -> None:
-    text = path.read_text(encoding="utf-8")
-    try:
-        report = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid incremental JSON report layout: {path}") from e
-
-    if not isinstance(report, dict) or not isinstance(report.get("findings"), list):
+    _strip_final_summary_if_present(path)
+    last = _last_non_whitespace_char(path)
+    if last not in {"[", "}"}:
         raise ValueError(f"Invalid incremental JSON report layout: {path}")
+    item_json = _indent_lines(
+        json.dumps(_finding_to_json_item(finding, include_reasoning=include_reasoning), indent=2),
+        4,
+    )
+    prefix = "\n" if last == "[" else ",\n"
+    with path.open("a", encoding="utf-8") as out:
+        out.write(prefix + item_json + "\n")
 
-    report["findings"].append(_finding_to_json_item(finding, include_reasoning=include_reasoning))
-    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+def append_json_summary(path: Path, findings: list[Finding]) -> None:
+    _strip_final_summary_if_present(path)
+    last = _last_non_whitespace_char(path)
+    if last not in {"[", "}"}:
+        raise ValueError(f"Invalid incremental JSON report layout: {path}")
+    summary_json = json.dumps(build_summary(findings), indent=2)
+    summary_lines = summary_json.splitlines()
+    summary_block = ['  "summary": ' + summary_lines[0]]
+    for line in summary_lines[1:]:
+        summary_block.append(f"  {line}")
+    tail = ["  ],", *summary_block, "}"]
+    with path.open("a", encoding="utf-8") as out:
+        out.write("\n" + "\n".join(tail) + "\n")
 
 
 def write_json_report(
@@ -76,21 +122,7 @@ def write_json_report(
     findings: list[Finding],
     include_reasoning: bool = True,
 ) -> None:
-    report = {
-        "scan_metadata": {
-            "tool": "vulnray",
-            "model": cfg.inference.model,
-            "mode": cfg.scan.mode,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "repo_root": repo_root,
-            "total_files_scanned": files_scanned,
-            "total_chunks_analyzed": chunks_analyzed,
-        },
-        "summary": build_summary(findings),
-        "findings": [],
-    }
-
+    init_json_report(path, cfg, repo_root, files_scanned, chunks_analyzed)
     for f in findings:
-        report["findings"].append(_finding_to_json_item(f, include_reasoning=include_reasoning))
-
-    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        append_json_finding(path, f, include_reasoning=include_reasoning)
+    append_json_summary(path, findings)

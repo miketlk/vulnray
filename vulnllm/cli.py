@@ -15,9 +15,9 @@ from vulnllm.inference.multipass import run_scan_multipass
 from vulnllm.inference.parameters import mode_params
 from vulnllm.indexing.project_index import ProjectIndex, build_project_index
 from vulnllm.prompt.base_prompt import build_prompt
-from vulnllm.reporting.csv_report import append_csv_finding, init_csv_report, write_csv_report
-from vulnllm.reporting.json_report import append_json_finding, init_json_report, write_json_report
-from vulnllm.reporting.markdown_report import append_markdown_finding, init_markdown_report, write_markdown_report
+from vulnllm.reporting.csv_report import append_csv_finding, init_csv_report
+from vulnllm.reporting.json_report import append_json_finding, append_json_summary, init_json_report
+from vulnllm.reporting.markdown_report import append_markdown_finding, append_markdown_summary_and_table, init_markdown_report
 from vulnllm.scanner.file_scanner import discover_files
 from vulnllm.utils.logging import configure_logging
 from vulnllm.utils.progress import maybe_progress
@@ -225,6 +225,8 @@ def run() -> int:
             init_csv_report(outputs["csv"])
         if "md" in outputs:
             init_markdown_report(outputs["md"], cfg)
+        emitted_seen: set[tuple[str, int, int, str]] = set()
+        emitted_count = 0
 
         backend = LlamaBackend(cfg)
         next_id = 1
@@ -269,7 +271,15 @@ def run() -> int:
             return findings
 
         def emit_findings(chunk_findings: list[Finding]) -> None:
+            nonlocal emitted_count
             for finding in chunk_findings:
+                emitted_key = (finding.file, finding.start_line, finding.end_line, finding.vulnerability_type)
+                if emitted_key in emitted_seen:
+                    continue
+                if cfg.scan.max_findings > 0 and emitted_count >= cfg.scan.max_findings:
+                    continue
+                emitted_seen.add(emitted_key)
+                emitted_count += 1
                 if "json" in outputs:
                     append_json_finding(
                         outputs["json"],
@@ -293,19 +303,9 @@ def run() -> int:
             findings = findings[: cfg.scan.max_findings]
 
         if "json" in outputs:
-            write_json_report(
-                outputs["json"],
-                cfg,
-                str(root.resolve()),
-                len(files),
-                len(all_chunks),
-                findings,
-                include_reasoning=cfg.output_cfg.include_reasoning,
-            )
-        if "csv" in outputs:
-            write_csv_report(outputs["csv"], findings)
+            append_json_summary(outputs["json"], findings)
         if "md" in outputs:
-            write_markdown_report(outputs["md"], cfg, findings, include_reasoning=cfg.output_cfg.include_reasoning)
+            append_markdown_summary_and_table(outputs["md"], cfg, findings)
 
         non_parser_findings = [f for f in findings if f.vulnerability_type != "ParserError"]
         return 1 if non_parser_findings else 0
