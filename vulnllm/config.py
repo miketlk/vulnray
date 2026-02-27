@@ -90,6 +90,9 @@ class LoggingConfig:
     quiet: bool = False
     verbose: bool = False
     log_file: str | None = None
+    log_prompts: bool = False
+    log_model_outputs: bool = False
+    prompt_output_md: str | None = None
 
 
 @dataclass
@@ -159,6 +162,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--log-file")
+    p.add_argument("--log-prompts", action="store_true")
+    p.add_argument("--log-model-outputs", action="store_true")
+    p.add_argument("--prompt-output-md")
 
     return p
 
@@ -268,6 +274,7 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
         ("multipass", "pass2_target"): args.pass2_target,
         ("multipass", "pass2_topk"): args.pass2_topk,
         ("logging", "log_file"): args.log_file,
+        ("logging", "prompt_output_md"): args.prompt_output_md,
     }
     for (s, k), v in mapping.items():
         if v is not None:
@@ -287,6 +294,10 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
         sec("logging")["quiet"] = True
     if args.verbose:
         sec("logging")["verbose"] = True
+    if args.log_prompts:
+        sec("logging")["log_prompts"] = True
+    if args.log_model_outputs:
+        sec("logging")["log_model_outputs"] = True
 
     _deep_update(data, cli)
     return data

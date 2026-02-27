@@ -23,7 +23,8 @@ focus = [
 
 [inference]
 model = "./models/VulnLLM-R-7B.Q4_K_M.gguf"
-context = 4096
+# Apple M2 Max (96GB): good quality/throughput balance for 7B Q4 models.
+context = 8192
 threads = 8
 batch = 512
 temperature = 0.1
@@ -43,3 +44,5 @@ include_reasoning = true
 progress = true
 quiet = false
 verbose = false
+log_prompts = true
+log_model_outputs = true

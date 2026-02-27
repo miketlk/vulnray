@@ -40,6 +40,7 @@ After the scan completes:
 - `tutorial/reports/demo_scan.json`
 - `tutorial/reports/demo_scan.csv`
 - `tutorial/reports/demo_scan.md`
+- `tutorial/reports/demo_scan.prompt_output.md`
 
 ## 5. Why this test project is useful
 

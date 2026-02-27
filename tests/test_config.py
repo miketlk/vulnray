@@ -50,3 +50,24 @@ def test_config_default_gpu_layers_is_cpu_safe():
     args = parser.parse_args([".", "--model", "./model.gguf"])
     cfg = resolve_config(args)
     assert cfg.inference.gpu_layers == 0
+
+
+def test_config_prompt_output_logging_defaults_off_and_cli_enables():
+    parser = build_parser()
+    args_default = parser.parse_args([".", "--model", "./model.gguf"])
+    cfg_default = resolve_config(args_default)
+    assert cfg_default.logging.log_prompts is False
+    assert cfg_default.logging.log_model_outputs is False
+
+    args = parser.parse_args(
+        [
+            ".",
+            "--model",
+            "./model.gguf",
+            "--log-prompts",
+            "--log-model-outputs",
+        ]
+    )
+    cfg = resolve_config(args)
+    assert cfg.logging.log_prompts is True
+    assert cfg.logging.log_model_outputs is True

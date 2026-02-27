@@ -57,6 +57,42 @@ def _collect_outputs(cfg) -> dict[str, Path]:
     return outputs
 
 
+def _prompt_output_log_path(cfg) -> Path:
+    if cfg.logging.prompt_output_md:
+        return Path(cfg.logging.prompt_output_md)
+    return Path(cfg.output_cfg.out_dir) / f"{cfg.output_cfg.out_prefix}.prompt_output.md"
+
+
+def _append_exchange_header(path: Path, entry: int, chunk: CodeChunk, deep: bool) -> None:
+    lines = [
+        "---",
+        "",
+        f"## Exchange {entry}",
+        "",
+        f"- Pass: `{'pass2' if deep else 'pass1'}`",
+        f"- File: `{chunk.file}`",
+        f"- Lines: `{chunk.start_line}-{chunk.end_line}`",
+        f"- Function: `{chunk.function or 'N/A'}`",
+        "",
+    ]
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
+def _append_prompt_section(path: Path, prompt: str) -> None:
+    lines = ["Prompt:", "", "```text", prompt, "```", ""]
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
+def _append_output_section(path: Path, output_text: str, error: str | None = None) -> None:
+    lines = ["Model Output:", "", "```text", output_text, "```", ""]
+    if error:
+        lines.extend([f"Error: `{error}`", ""])
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
 def run() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -91,9 +127,18 @@ def run() -> int:
         pass2_progress = 0
         progress_enabled = cfg.logging.progress and not cfg.logging.quiet
         total_chunks = len(all_chunks)
+        log_prompt_io = cfg.logging.log_prompts or cfg.logging.log_model_outputs
+        prompt_output_path: Path | None = None
+        prompt_output_entry = 0
+        if log_prompt_io:
+            prompt_output_path = _prompt_output_log_path(cfg)
+            prompt_output_path.parent.mkdir(parents=True, exist_ok=True)
+            if prompt_output_path.exists() and not cfg.output_cfg.overwrite:
+                raise ValueError(f"Output file already exists: {prompt_output_path} (use --overwrite)")
+            prompt_output_path.write_text("# Prompt/Model Output Log\n", encoding="utf-8")
 
         def run_chunk(chunk: CodeChunk, deep: bool = False) -> list[Finding]:
-            nonlocal next_id, pass1_progress, pass2_progress
+            nonlocal next_id, pass1_progress, pass2_progress, prompt_output_entry
             if deep:
                 pass2_progress += 1
                 maybe_progress(progress_enabled, pass2_progress, total_chunks, f"{chunk.file} (pass2)")
@@ -101,7 +146,17 @@ def run() -> int:
                 pass1_progress += 1
                 maybe_progress(progress_enabled, pass1_progress, total_chunks, f"{chunk.file} (pass1)")
             prompt = build_prompt(cfg, chunk, index_context=_index_context(index, chunk))
+            if prompt_output_path is not None:
+                prompt_output_entry += 1
+                if cfg.logging.log_prompts:
+                    _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+                    _append_prompt_section(prompt_output_path, prompt)
             result = backend.generate(prompt, mode_params(cfg, deep=deep))
+            if prompt_output_path is not None:
+                if cfg.logging.log_model_outputs:
+                    if not cfg.logging.log_prompts:
+                        _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+                    _append_output_section(prompt_output_path, result.text, result.error)
             if result.error:
                 raise RuntimeError(result.error)
             findings, next_id2 = parse_findings(result.text, chunk, start_id=next_id)

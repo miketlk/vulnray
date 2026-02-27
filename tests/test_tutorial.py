@@ -43,3 +43,4 @@ def test_tutorial_command_generates_all_reports_with_python_backend(monkeypatch,
     assert (out_dir / "demo_scan.json").exists()
     assert (out_dir / "demo_scan.csv").exists()
     assert (out_dir / "demo_scan.md").exists()
+    assert (out_dir / "demo_scan.prompt_output.md").exists()

@@ -40,6 +40,14 @@ def test_reports_generation(tmp_path: Path):
     write_markdown_report(md_path, cfg, findings, include_reasoning=True)
 
     data = json.loads(json_path.read_text(encoding="utf-8"))
+    md_text = md_path.read_text(encoding="utf-8")
+
     assert data["summary"]["total_findings"] == 1
     assert "Buffer Overflow" in csv_path.read_text(encoding="utf-8")
-    assert "# VulnLLM Scan Report" in md_path.read_text(encoding="utf-8")
+    assert "# VulnLLM Scan Report" in md_text
+    assert "| ID | File | Lines | Function | Type | Severity | Confidence |" in md_text
+    assert "| F-0001 | [src/a.c](" in md_text
+    assert "| `foo` | Buffer Overflow | high | 0.90 |" in md_text
+    assert "- Lines: [10](" in md_text
+    assert "-[20](" in md_text
+    assert "- Findings Table ID: `F-0001`" in md_text
