@@ -15,9 +15,16 @@ def run_scan_multipass(
     backend,
     chunks: list[CodeChunk],
     run_chunk,
+    on_emit=None,
 ) -> list[Finding]:
     if not cfg.scan.multi_pass:
-        return [f for chunk in chunks for f in run_chunk(chunk, deep=False)]
+        merged: list[Finding] = []
+        for chunk in chunks:
+            chunk_findings = run_chunk(chunk, deep=False)
+            if on_emit is not None:
+                on_emit(chunk_findings)
+            merged.extend(chunk_findings)
+        return merged
 
     # "fast" keeps pass-1 shallow for screening. "normal" allows deeper pass-1 analysis.
     pass1_deep = cfg.multipass.pass1_budget == "normal"
@@ -33,6 +40,9 @@ def run_scan_multipass(
     merged: list[Finding] = []
     for chunk, findings in pass1:
         replacement = deep_map.get(id(chunk))
-        merged.extend(replacement if replacement is not None else findings)
+        chosen = replacement if replacement is not None else findings
+        if on_emit is not None:
+            on_emit(chosen)
+        merged.extend(chosen)
 
     return merged

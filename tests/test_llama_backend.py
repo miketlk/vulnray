@@ -85,3 +85,59 @@ You are a code security reviewer. Return ONLY JSON:
 
     assert len(findings) == 1
     assert findings[0].vulnerability_type == "Integer Overflow"
+
+
+def test_llama_backend_populates_usage_metrics(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    class FakeLlama:
+        def __init__(self, **_kwargs):
+            pass
+
+        def create_completion(self, **_kwargs):
+            return {
+                "choices": [{"text": "ok"}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46},
+            }
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    backend = LlamaBackend(cfg)
+
+    result = backend.generate(
+        "scan this",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=64),
+    )
+
+    assert result.error is None
+    assert result.prompt_tokens == 12
+    assert result.completion_tokens == 34
+    assert result.total_tokens == 46
+
+
+def test_llama_backend_exposes_backend_library_version(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    class FakeLlama:
+        def __init__(self, **_kwargs):
+            pass
+
+        def create_completion(self, **_kwargs):
+            return {"choices": [{"text": "ok"}], "usage": {}}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "llama_cpp",
+        types.SimpleNamespace(Llama=FakeLlama, __version__="0.3.2"),
+    )
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    backend = LlamaBackend(cfg)
+
+    assert backend.backend_name() == "llama-cpp-python"
+    assert backend.backend_version() == "0.3.2"

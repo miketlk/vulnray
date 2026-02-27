@@ -22,6 +22,53 @@ def _markdown_link(label: str, uri: str) -> str:
     return f"[{label}]({uri})"
 
 
+def init_markdown_report(path: Path, cfg: Config) -> None:
+    lines = [
+        "# VulnLLM Scan Report (Live)",
+        "",
+        "## Executive Summary",
+        "",
+        f"- Mode: `{cfg.scan.mode}`",
+        "- Status: `running`",
+        "",
+        "## Detailed Findings",
+        "",
+    ]
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def append_markdown_finding(path: Path, cfg: Config, f: Finding, include_reasoning: bool = True) -> None:
+    if f.vulnerability_type == "ParserError":
+        return
+    root = Path(cfg.path).resolve()
+    abs_path = _resolve_file_path(root, f.file)
+    file_link = _markdown_link(f.file, _markdown_file_link(path, abs_path, f.start_line))
+    start_link = _markdown_link(str(f.start_line), _markdown_file_link(path, abs_path, f.start_line))
+    end_link = _markdown_link(str(f.end_line), _markdown_file_link(path, abs_path, f.end_line))
+    lines = [
+        f"### {f.id} - {f.vulnerability_type}",
+        "",
+        f"- File: {file_link}",
+        f"- Lines: {start_link}-{end_link}",
+        f"- Function: `{f.function or 'N/A'}`",
+        f"- Severity: `{f.severity}`",
+        f"- Confidence: `{f.confidence:.2f}`",
+        "",
+        "Description:",
+        "",
+        f.description or "(none)",
+        "",
+    ]
+    if include_reasoning:
+        lines.extend(["Reasoning:", "", "```text", f.reasoning or "(none)", "```", ""])
+    if f.references:
+        lines.extend(["References:", "", ", ".join(f.references), ""])
+    if f.recommendation:
+        lines.extend(["Recommendation:", "", f.recommendation, ""])
+    with path.open("a", encoding="utf-8") as out:
+        out.write("\n".join(lines).rstrip() + "\n")
+
+
 def write_markdown_report(path: Path, cfg: Config, findings: list[Finding], include_reasoning: bool = True) -> None:
     summary = build_summary(findings)
     root = Path(cfg.path).resolve()

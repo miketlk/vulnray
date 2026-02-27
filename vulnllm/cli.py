@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 from vulnllm.chunking.function_chunker import CodeChunk, chunk_file_by_function
@@ -14,14 +15,103 @@ from vulnllm.inference.multipass import run_scan_multipass
 from vulnllm.inference.parameters import mode_params
 from vulnllm.indexing.project_index import ProjectIndex, build_project_index
 from vulnllm.prompt.base_prompt import build_prompt
-from vulnllm.reporting.csv_report import write_csv_report
-from vulnllm.reporting.json_report import write_json_report
-from vulnllm.reporting.markdown_report import write_markdown_report
+from vulnllm.reporting.csv_report import append_csv_finding, init_csv_report, write_csv_report
+from vulnllm.reporting.json_report import append_json_finding, init_json_report, write_json_report
+from vulnllm.reporting.markdown_report import append_markdown_finding, init_markdown_report, write_markdown_report
 from vulnllm.scanner.file_scanner import discover_files
 from vulnllm.utils.logging import configure_logging
 from vulnllm.utils.progress import maybe_progress
 
 log = logging.getLogger("vulnllm")
+
+
+def _approx_tokens(text: str, *, allow_zero: bool = False) -> int:
+    if allow_zero:
+        return max(0, len(text) // 4)
+    return max(1, len(text) // 4)
+
+
+def _peak_rss_mb() -> float:
+    import resource
+
+    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return peak_rss / (1024 * 1024)
+    return peak_rss / 1024
+
+
+def _backend_name_and_version(backend: object) -> tuple[str, str]:
+    raw_name = getattr(backend, "backend_name", None)
+    if callable(raw_name):
+        name = str(raw_name())
+    elif isinstance(raw_name, str):
+        name = raw_name
+    else:
+        name = backend.__class__.__name__
+
+    raw_version = getattr(backend, "backend_version", None)
+    if callable(raw_version):
+        version = str(raw_version())
+    elif isinstance(raw_version, str):
+        version = raw_version
+    else:
+        version = "unknown"
+    return name, version
+
+
+def _run_llm_inference_test(cfg) -> int:
+    prompt = (
+        "You are a security reviewer. Analyze this C code and list vulnerabilities as JSON.\n"
+        "```c\n"
+        "void copy(char *dst, const char *src) {\n"
+        "    char buf[16];\n"
+        "    strcpy(buf, src);\n"
+        "    strcpy(dst, buf);\n"
+        "}\n"
+        "```\n"
+        'Return JSON with key "vulnerabilities".'
+    )
+    rss_before = _peak_rss_mb()
+    backend = LlamaBackend(cfg)
+    backend_name, backend_version = _backend_name_and_version(backend)
+    rss_after_load = _peak_rss_mb()
+
+    t0 = time.perf_counter()
+    result = backend.generate(prompt, mode_params(cfg))
+    elapsed = max(1e-9, time.perf_counter() - t0)
+    rss_after_infer = _peak_rss_mb()
+
+    if result.error:
+        raise RuntimeError(result.error)
+
+    prompt_tokens = result.prompt_tokens if result.prompt_tokens is not None else _approx_tokens(prompt)
+    completion_tokens = (
+        result.completion_tokens
+        if result.completion_tokens is not None
+        else _approx_tokens(result.text, allow_zero=True)
+    )
+    total_tokens = result.total_tokens if result.total_tokens is not None else prompt_tokens + completion_tokens
+    model_weights_memory_mb = max(0.0, rss_after_load - rss_before)
+    runtime_memory_mb = max(0.0, rss_after_infer - rss_after_load)
+    total_memory_mb = max(0.0, rss_after_infer - rss_before)
+
+    print("LLM inference benchmark")
+    print(f"backend: {backend_name}")
+    print(f"backend_version: {backend_version}")
+    print(f"model: {cfg.inference.model}")
+    print(f"elapsed_sec: {elapsed:.3f}")
+    print(f"prompt_tokens: {prompt_tokens}")
+    print(f"completion_tokens: {completion_tokens}")
+    print(f"total_tokens: {total_tokens}")
+    print(f"tokens_per_sec: {completion_tokens / elapsed:.2f}")
+    print(f"total_tokens_per_sec: {total_tokens / elapsed:.2f}")
+    print(f"memory_peak_mb_before: {rss_before:.2f}")
+    print(f"memory_peak_mb_after_load: {rss_after_load:.2f}")
+    print(f"memory_peak_mb_after_inference: {rss_after_infer:.2f}")
+    print(f"model_weights_memory_mb: {model_weights_memory_mb:.2f}")
+    print(f"runtime_memory_mb: {runtime_memory_mb:.2f}")
+    print(f"memory_used_mb: {total_memory_mb:.2f}")
+    return 0
 
 
 def _build_chunks(path: Path, root: Path, strategy: str, chunk_tokens: int, overlap: int) -> list[CodeChunk]:
@@ -105,11 +195,19 @@ def run() -> int:
 
     configure_logging(cfg.logging.verbose, cfg.logging.quiet, cfg.logging.log_file)
 
-    root = Path(cfg.path)
     try:
+        if cfg.llm_inference_test:
+            return _run_llm_inference_test(cfg)
+
+        root = Path(cfg.path)
         files = discover_files(str(root), cfg.scan, cfg.files)
         if not files:
             log.warning("No files matched scan criteria")
+        if cfg.dry_run:
+            for file_path in files:
+                rel = file_path.relative_to(root if root.is_dir() else root.parent)
+                print(str(rel).replace("\\", "/"))
+            return 0
 
         index = None
         if cfg.project.index == "basic" and files:
@@ -120,6 +218,13 @@ def run() -> int:
             all_chunks.extend(
                 _build_chunks(f, root, cfg.chunking.strategy, cfg.chunking.chunk_tokens, cfg.chunking.overlap)
             )
+        outputs = _collect_outputs(cfg)
+        if "json" in outputs:
+            init_json_report(outputs["json"], cfg, str(root.resolve()), len(files), len(all_chunks))
+        if "csv" in outputs:
+            init_csv_report(outputs["csv"])
+        if "md" in outputs:
+            init_markdown_report(outputs["md"], cfg)
 
         backend = LlamaBackend(cfg)
         next_id = 1
@@ -163,13 +268,29 @@ def run() -> int:
             next_id = next_id2
             return findings
 
-        findings = run_scan_multipass(cfg, backend, all_chunks, run_chunk)
+        def emit_findings(chunk_findings: list[Finding]) -> None:
+            for finding in chunk_findings:
+                if "json" in outputs:
+                    append_json_finding(
+                        outputs["json"],
+                        finding,
+                        include_reasoning=cfg.output_cfg.include_reasoning,
+                    )
+                if "csv" in outputs:
+                    append_csv_finding(outputs["csv"], finding)
+                if "md" in outputs:
+                    append_markdown_finding(
+                        outputs["md"],
+                        cfg,
+                        finding,
+                        include_reasoning=cfg.output_cfg.include_reasoning,
+                    )
+
+        findings = run_scan_multipass(cfg, backend, all_chunks, run_chunk, on_emit=emit_findings)
         findings = deduplicate_findings(findings)
 
         if cfg.scan.max_findings > 0:
             findings = findings[: cfg.scan.max_findings]
-
-        outputs = _collect_outputs(cfg)
 
         if "json" in outputs:
             write_json_report(

@@ -71,3 +71,17 @@ def test_config_prompt_output_logging_defaults_off_and_cli_enables():
     cfg = resolve_config(args)
     assert cfg.logging.log_prompts is True
     assert cfg.logging.log_model_outputs is True
+
+
+def test_config_dry_run_does_not_require_model():
+    parser = build_parser()
+    args = parser.parse_args([".", "--dry-run"])
+    cfg = resolve_config(args)
+    assert cfg.dry_run is True
+
+
+def test_config_llm_inference_test_flag():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--llm-inference-test"])
+    cfg = resolve_config(args)
+    assert cfg.llm_inference_test is True

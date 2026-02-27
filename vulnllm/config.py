@@ -100,6 +100,8 @@ class Config:
     path: str = "."
     config_path: str | None = None
     output: str | None = None
+    dry_run: bool = False
+    llm_inference_test: bool = False
 
     scan: ScanConfig = field(default_factory=ScanConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
@@ -116,6 +118,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="vulnllm-scan", description="Local LLM vulnerability scanner")
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("--config", dest="config_path")
+    p.add_argument("--dry-run", action="store_true", help="Print matched files and exit")
+    p.add_argument(
+        "--llm-inference-test",
+        action="store_true",
+        default=None,
+        help="Run one LLM inference benchmark prompt and exit (ignores scan path)",
+    )
 
     p.add_argument("--output", help="Comma-separated: json,csv,md")
     p.add_argument("--out-dir")
@@ -229,6 +238,7 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
     cli: dict[str, Any] = {
         "path": args.path,
         "config_path": args.config_path,
+        "dry_run": args.dry_run,
     }
 
     def sec(section: str) -> dict[str, Any]:
@@ -286,6 +296,8 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
         sec("files")["follow_symlinks"] = True
     if args.multi_pass:
         sec("scan")["multi_pass"] = True
+    if args.llm_inference_test is True:
+        cli["llm_inference_test"] = True
     if args.metal:
         sec("inference")["metal"] = True
     if args.progress is True:
@@ -307,6 +319,8 @@ def _from_dict(d: dict[str, Any]) -> Config:
     return Config(
         path=d.get("path", "."),
         config_path=d.get("config_path"),
+        dry_run=d.get("dry_run", False),
+        llm_inference_test=d.get("llm_inference_test", False),
         scan=ScanConfig(**d.get("scan", {})),
         files=FilesConfig(**d.get("files", {})),
         chunking=ChunkingConfig(**d.get("chunking", {})),
@@ -339,7 +353,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
 
     if cfg.scan.max_findings and cfg.scan.max_findings < 0:
         raise ValueError("scan.max_findings must be >= 0")
-    if not cfg.inference.model:
+    if not cfg.inference.model and not cfg.dry_run:
         raise ValueError("Missing required config: inference.model (set --model or TOML [inference].model)")
     if cfg.scan.mode not in {"max-recall", "balanced", "deterministic"}:
         raise ValueError("scan.mode must be max-recall|balanced|deterministic")
