@@ -61,15 +61,19 @@ def _backend_name_and_version(backend: object) -> tuple[str, str]:
 
 def _run_llm_inference_test(cfg) -> int:
     prompt = (
-        "You are a security reviewer. Analyze this C code and list vulnerabilities as JSON.\n"
+        "You are an advanced vulnerability detection model.\n"
+        "Analyze the target function and return ONLY JSON with keys final_answer and vulnerabilities.\n"
         "```c\n"
+        "// context\n"
+        "// N/A\n"
+        "// target function\n"
         "void copy(char *dst, const char *src) {\n"
         "    char buf[16];\n"
         "    strcpy(buf, src);\n"
         "    strcpy(dst, buf);\n"
         "}\n"
         "```\n"
-        'Return JSON with key "vulnerabilities".'
+        'If vulnerable, use one CWE in final_answer.type; otherwise set final_answer.type to "N/A".'
     )
     rss_before = _peak_rss_mb()
     backend = LlamaBackend(cfg)

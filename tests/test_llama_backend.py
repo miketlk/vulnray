@@ -87,6 +87,35 @@ You are a code security reviewer. Return ONLY JSON:
     assert findings[0].vulnerability_type == "Integer Overflow"
 
 
+def test_parse_findings_accepts_final_answer_format_yes():
+    raw = """
+<reasoning>
+Potential out-of-bounds write through unchecked copy length.
+</reasoning>
+## Final Answer
+#judge: yes
+#type: CWE-787
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].vulnerability_type == "CWE-787"
+    assert "CWE-787" in findings[0].references
+
+
+def test_parse_findings_accepts_final_answer_format_no():
+    raw = """
+## Final Answer
+#judge: no
+#type: N/A
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert findings == []
+
+
 def test_llama_backend_populates_usage_metrics(tmp_path: Path, monkeypatch):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"GGUF")

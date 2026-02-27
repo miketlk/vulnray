@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from vulnllm.chunking.function_chunker import CodeChunk
@@ -64,10 +65,44 @@ def _extract_json(raw: str) -> dict:
     raise ValueError("No JSON object found")
 
 
+def _extract_final_answer_format(raw: str) -> dict | None:
+    judge_match = re.search(r"(?im)^\s*#judge:\s*(yes|no)\s*$", raw)
+    type_match = re.search(r"(?im)^\s*#type:\s*([^\n\r]+)\s*$", raw)
+    if judge_match is None or type_match is None:
+        return None
+
+    judge = judge_match.group(1).strip().lower()
+    vuln_type = type_match.group(1).strip()
+    if judge == "no":
+        return {"vulnerabilities": []}
+
+    if vuln_type.upper() == "N/A":
+        vuln_type = "Potential Vulnerability"
+    cwe = vuln_type.upper() if vuln_type.upper().startswith("CWE-") else ""
+    return {
+        "vulnerabilities": [
+            {
+                "vulnerability_type": vuln_type,
+                "severity": "medium",
+                "confidence": 0.6,
+                "description": "Parsed from #judge/#type output.",
+                "reasoning": raw[:1200],
+                "recommendation": "Manually review and confirm exploitability.",
+                "references": [cwe] if cwe else [],
+            }
+        ]
+    }
+
+
 def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
     try:
-        obj = _extract_json(raw)
+        try:
+            obj = _extract_json(raw)
+        except ValueError:
+            obj = _extract_final_answer_format(raw)
+            if obj is None:
+                raise
         vulns = obj.get("vulnerabilities", [])
         if not isinstance(vulns, list):
             raise ValueError("vulnerabilities must be list")

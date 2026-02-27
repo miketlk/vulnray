@@ -3,7 +3,7 @@ mode = "balanced"
 languages = ["c"]
 
 [files]
-include = ["**/*.c", "**/*.h"]
+include = ["**/*.c"]
 exclude = ["build/**", "third_party/**"]
 max_file_bytes = 2000000
 
