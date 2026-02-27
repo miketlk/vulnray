@@ -1,0 +1,45 @@
+[scan]
+mode = "balanced"
+languages = ["c"]
+
+[files]
+include = ["**/*.c", "**/*.h"]
+exclude = ["build/**", "third_party/**"]
+max_file_bytes = 2000000
+
+[chunking]
+strategy = "function"
+chunk_tokens = 1400
+overlap = 200
+
+[prompt]
+profile = "embedded-c"
+focus = [
+  "memory safety",
+  "unsafe string handling",
+  "integer overflow",
+  "path traversal",
+]
+
+[inference]
+model = "./models/VulnLLM-R-7B.Q4_K_M.gguf"
+context = 4096
+threads = 8
+batch = 512
+temperature = 0.1
+top_p = 0.95
+seed = 0
+gpu_layers = -1
+max_tokens = 1400
+
+[output]
+formats = ["json", "csv", "md"]
+out_dir = "./tutorial/reports"
+out_prefix = "demo_scan"
+overwrite = true
+include_reasoning = true
+
+[logging]
+progress = true
+quiet = false
+verbose = false

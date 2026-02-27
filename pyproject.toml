@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vulnllm-scan"
+version = "0.1.0"
+description = "Local vulnerability scanner for C code powered by GGUF LLMs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "llama-cpp-python>=0.2.90,<0.3.0",
+]
+
+[project.scripts]
+vulnllm-scan = "vulnllm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vulnllm*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
