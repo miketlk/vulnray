@@ -5,12 +5,12 @@ This tutorial shows how to run `vulnray` against a small C project and generate 
 ## 1. Tutorial contents
 
 - `tutorial/test_project/`: vulnerable C project used as scan input
-- `tutorial/vulnllm.toml`: scanner configuration
+- `tutorial/vulnray.toml`: scanner configuration
 - `tutorial/reports/`: generated reports (`json`, `csv`, `md`)
 
 ## 2. Config highlights
 
-`tutorial/vulnllm.toml` includes:
+`tutorial/vulnray.toml` includes:
 
 - model path: `./models/VulnLLM-R-7B.Q4_K_M.gguf`
 - output formats: `json`, `csv`, `md`
@@ -23,7 +23,7 @@ From repository root:
 
 ```bash
 python -m pip install -e .
-vulnray tutorial/test_project --config tutorial/vulnllm.toml
+vulnray tutorial/test_project --config tutorial/vulnray.toml
 ```
 
 Notes:
