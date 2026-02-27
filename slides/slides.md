@@ -123,4 +123,3 @@ From `tutorial/reports/demo_scan.md` (mode: `balanced`):
 ### Credit (authors)
 
 Yuzhou Nie, Hongwei Li, Chengquan Guo, Ruizhe Jiang, Zhun Wang, Bo Li, Dawn Song, Wenbo Guo.
-
