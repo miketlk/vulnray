@@ -78,3 +78,27 @@ def test_build_prompt_keeps_comment_like_tokens_inside_literals():
     assert 'https://example.com/a/*b*/c' in prompt
     assert "char slash = '/';" in prompt
     assert "char quote = '\\'';" in prompt
+
+
+def test_build_prompt_collapses_sequential_blank_lines_after_comment_strip():
+    cfg = Config(path=".")
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=12,
+        function="foo",
+        text=(
+            "int foo(void) {\n"
+            "    int x = 1;\n"
+            "    // comment-only line\n"
+            "    /* block comment line */\n"
+            "    int y = x + 1;\n"
+            "    return y;\n"
+            "}\n"
+        ),
+    )
+
+    prompt = build_prompt(cfg, chunk, index_context="")
+
+    assert "int x = 1;\n\n\n    int y = x + 1;" not in prompt
+    assert "int x = 1;\n\n    int y = x + 1;" in prompt

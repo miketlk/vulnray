@@ -125,7 +125,22 @@ def _strip_c_comments(text: str) -> str:
         out.append(ch)
         i += 1
 
-    return "".join(out)
+    stripped = "".join(out)
+    lines = stripped.splitlines(keepends=True)
+    collapsed: list[str] = []
+    prev_blank = False
+    for line in lines:
+        is_blank = line.strip() == ""
+        if is_blank and prev_blank:
+            continue
+        if is_blank:
+            # Canonicalize whitespace-only lines to a true empty line.
+            collapsed.append("\n" if line.endswith("\n") else "")
+        else:
+            collapsed.append(line)
+        prev_blank = is_blank
+
+    return "".join(collapsed)
 
 
 def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
