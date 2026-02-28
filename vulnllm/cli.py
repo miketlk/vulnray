@@ -176,7 +176,7 @@ def _append_exchange_header(path: Path, entry: int, chunk: CodeChunk, deep: bool
 
 
 def _append_prompt_section(path: Path, prompt: str) -> None:
-    lines = ["Prompt:", "", *_fenced_text_block(prompt), ""]
+    lines = ["### Prompt", "", *_fenced_text_block(prompt), ""]
     with path.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
 
@@ -187,14 +187,17 @@ def _append_inference_metadata_section(
     timestamp_local: str | None,
     context_size: int | None,
     context_events: list[str] | None,
+    seed: int | None = None,
 ) -> None:
     if timestamp_local is None:
         timestamp_local = datetime.now().astimezone().isoformat(timespec="seconds")
-    lines = ["Inference Metadata:", ""]
+    lines = ["### Inference Metadata", ""]
     if timestamp_local:
         lines.append(f"- Timestamp: `{timestamp_local}`")
     if context_size is not None:
         lines.append(f"- Context size: `{context_size}`")
+    if seed is not None:
+        lines.append(f"- Seed: `{seed}`")
     if context_events:
         lines.append("- Context events:")
         for event in context_events:
@@ -207,7 +210,7 @@ def _append_inference_metadata_section(
 
 
 def _append_output_section(path: Path, output_text: str, error: str | None = None) -> None:
-    lines = ["Model Output:", "", *_fenced_text_block(output_text), ""]
+    lines = ["### Model Output", "", *_fenced_text_block(output_text), ""]
     if error:
         lines.extend([f"Error: `{error}`", ""])
     with path.open("a", encoding="utf-8") as f:
@@ -311,9 +314,11 @@ def run() -> int:
             parsed_findings: list[Finding] | None = None
             next_id2: int | None = None
             last_parse_error: str | None = None
+            used_seed: int | None = None
 
             for attempt in range(max_attempts):
                 params = replace(base_params, seed=base_params.seed + attempt)
+                used_seed = params.seed
                 result = backend.generate(prompt, params)
                 if result.error:
                     break
@@ -344,6 +349,7 @@ def run() -> int:
                         timestamp_local=result.timestamp_local,
                         context_size=result.context_size or cfg.inference.context,
                         context_events=result.context_events,
+                        seed=used_seed,
                     )
                 if cfg.logging.log_prompts:
                     _append_prompt_section(prompt_output_path, prompt)

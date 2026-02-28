@@ -91,8 +91,8 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
 
         def generate(self, prompt, _params):
             text = log_file.read_text(encoding="utf-8")
-            saw_prompt_during_generate["value"] = "Prompt:" in text
-            saw_output_during_generate["value"] = "Model Output:" in text
+            saw_prompt_during_generate["value"] = "### Prompt" in text
+            saw_output_during_generate["value"] = "### Model Output" in text
             return InferenceResult(
                 text=json.dumps({"vulnerabilities": []}),
                 error=None,
@@ -133,14 +133,15 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
     assert "# Prompt/Model Output Log" in text
     assert "## Exchange 1" in text
     assert "\n---\n" in text
-    assert "Prompt:" in text
-    assert "Inference Metadata:" in text
+    assert "### Prompt" in text
+    assert "### Inference Metadata" in text
     assert "- Timestamp: `2026-02-28T10:11:12-08:00`" in text
     assert "- Context size: `12288`" in text
+    assert "- Seed: `0`" in text
     assert "context increase: 8192 -> 12288" in text
     assert "context decrease: 12288 -> 8192" in text
-    assert "Model Output:" in text
-    assert text.index("Inference Metadata:") < text.index("Prompt:")
+    assert "### Model Output" in text
+    assert text.index("### Inference Metadata") < text.index("### Prompt")
 
 
 def test_prompt_output_log_uses_safe_fence_for_embedded_backticks(monkeypatch, tmp_path: Path):
