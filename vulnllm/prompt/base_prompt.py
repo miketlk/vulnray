@@ -48,6 +48,86 @@ def _as_comment_block(text: str) -> str:
     return "\n".join("// " + line if line else "//" for line in lines)
 
 
+def _strip_c_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_line_comment = False
+    in_block_comment = False
+    in_string = False
+    in_char = False
+    escaping = False
+
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+
+        if in_line_comment:
+            if ch == "\n":
+                in_line_comment = False
+                out.append("\n")
+            i += 1
+            continue
+
+        if in_block_comment:
+            if ch == "\n":
+                out.append("\n")
+                i += 1
+                continue
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if in_string:
+            out.append(ch)
+            if escaping:
+                escaping = False
+            elif ch == "\\":
+                escaping = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if in_char:
+            out.append(ch)
+            if escaping:
+                escaping = False
+            elif ch == "\\":
+                escaping = True
+            elif ch == "'":
+                in_char = False
+            i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            in_char = True
+            out.append(ch)
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
 def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
     profile = EMBEDDED_C_GUIDANCE if cfg.prompt.profile == "embedded-c" else ""
     focus = build_focus_block(cfg.prompt.focus, cfg.prompt.prompt_file)
@@ -63,6 +143,6 @@ def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
         parts.append(focus)
     parts.append("Chunk metadata:\n" + json.dumps(metadata, indent=2))
     context_text = _as_comment_block(index_context.strip() or "N/A")
-    code_snippet = "\n".join(["// context", context_text, "// target function", chunk.text])
+    code_snippet = "\n".join(["// context", context_text, "// target function", _strip_c_comments(chunk.text)])
     parts.append("Code snippet:\n```c\n" + code_snippet + "\n```")
     return "\n\n".join(p for p in parts if p)
