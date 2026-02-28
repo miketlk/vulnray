@@ -417,6 +417,7 @@ def test_scan_prints_processing_stats(monkeypatch, tmp_path: Path, capsys):
     assert "average_tokens_per_second:" in stdout
     assert "average_exchange_time_sec:" in stdout
     assert "total_processing_time_sec:" in stdout
+    assert "total_processing_time_hhmmss:" in stdout
 
 
 def test_function_filter_scans_only_selected_function(monkeypatch, tmp_path: Path):

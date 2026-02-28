@@ -239,6 +239,10 @@ def _print_processing_stats(
     exchange_count: int,
     total_processing_time_sec: float,
 ) -> None:
+    total_seconds = int(max(0.0, total_processing_time_sec))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    total_processing_hhmmss = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     avg_tokens_per_sec = (
         float(total_exchange_tokens) / total_exchange_time_sec if total_exchange_time_sec > 0.0 else 0.0
     )
@@ -249,6 +253,7 @@ def _print_processing_stats(
     print(f"average_tokens_per_second: {avg_tokens_per_sec:.2f}")
     print(f"average_exchange_time_sec: {avg_exchange_time:.3f}")
     print(f"total_processing_time_sec: {total_processing_time_sec:.3f}")
+    print(f"total_processing_time_hhmmss: {total_processing_hhmmss}")
 
 
 def run() -> int:
