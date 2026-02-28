@@ -40,8 +40,36 @@ def _extract_json(raw: str) -> dict:
         return json.loads(block)
 
     decoder = json.JSONDecoder()
-    best: dict | None = None
-    best_with_vulns: dict | None = None
+    best_any: dict | None = None
+    best_scored: tuple[int, dict] | None = None
+
+    def score_obj(obj: dict) -> int:
+        score = 0
+        final_answer = obj.get("final_answer")
+        if isinstance(final_answer, dict):
+            if isinstance(final_answer.get("judge"), str):
+                score += 8
+            if isinstance(final_answer.get("type"), str):
+                score += 8
+        vulns = obj.get("vulnerabilities")
+        if isinstance(vulns, list):
+            score += 20
+            score += min(len(vulns), 5)
+            for v in vulns:
+                if not isinstance(v, dict):
+                    continue
+                for key in (
+                    "vulnerability_type",
+                    "severity",
+                    "confidence",
+                    "description",
+                    "reasoning",
+                    "recommendation",
+                    "references",
+                ):
+                    if key in v:
+                        score += 1
+        return score
     idx = 0
     while True:
         idx = raw.find("{", idx)
@@ -53,15 +81,17 @@ def _extract_json(raw: str) -> dict:
             idx += 1
             continue
         if isinstance(obj, dict):
-            best = obj
-            if "vulnerabilities" in obj:
-                best_with_vulns = obj
+            if best_any is None:
+                best_any = obj
+            score = score_obj(obj)
+            if best_scored is None or score > best_scored[0]:
+                best_scored = (score, obj)
         idx += 1
 
-    if best_with_vulns is not None:
-        return best_with_vulns
-    if best is not None:
-        return best
+    if best_scored is not None:
+        return best_scored[1]
+    if best_any is not None:
+        return best_any
     raise ValueError("No JSON object found")
 
 

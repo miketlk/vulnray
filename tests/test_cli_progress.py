@@ -143,6 +143,51 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
     assert text.index("Inference Metadata:") < text.index("Prompt:")
 
 
+def test_prompt_output_log_uses_safe_fence_for_embedded_backticks(monkeypatch, tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+    log_file = out_dir / "scan.prompt_output.md"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(
+                text='JSON output:\n```json\n{"vulnerabilities":[]}\n```',
+                error=None,
+            )
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+            "--log-prompts",
+            "--log-model-outputs",
+        ],
+    )
+
+    rc = run()
+
+    assert rc == 0
+    text = log_file.read_text(encoding="utf-8")
+    assert "````text" in text
+    assert text.count("````") >= 2
+
+
 def test_dry_run_prints_files_without_inference(monkeypatch, tmp_path: Path, capsys):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.c").write_text("int a(void) { return 1; }\n", encoding="utf-8")
@@ -320,3 +365,99 @@ def test_function_filter_scans_only_selected_function(monkeypatch, tmp_path: Pat
     assert len(prompts) == 1
     assert "int bar(int x)" in prompts[0]
     assert "int foo(int x)" not in prompts[0]
+
+
+def test_scan_retries_unparsable_output_with_different_seed_then_succeeds(monkeypatch, tmp_path: Path, caplog):
+    src = tmp_path / "main.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+    seen_seeds: list[int] = []
+    calls = {"n": 0}
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, params):
+            calls["n"] += 1
+            seen_seeds.append(params.seed)
+            if calls["n"] == 1:
+                return InferenceResult(text="not-json", error=None)
+            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--seed",
+            "7",
+            "--retries",
+            "3",
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    caplog.set_level(logging.WARNING, logger="vulnllm")
+    rc = run()
+
+    assert rc == 0
+    assert calls["n"] == 2
+    assert seen_seeds[:2] == [7, 8]
+    assert "Unparsable model output; retrying" in caplog.text
+    assert "Skipping function due to unparsable model output" not in caplog.text
+
+
+def test_scan_skips_chunk_after_unparsable_retries_exhausted(monkeypatch, tmp_path: Path, caplog):
+    src = tmp_path / "main.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+    seen_seeds: list[int] = []
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, params):
+            seen_seeds.append(params.seed)
+            return InferenceResult(text="still not-json", error=None)
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--seed",
+            "11",
+            "--retries",
+            "2",
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    caplog.set_level(logging.WARNING, logger="vulnllm")
+    rc = run()
+
+    assert rc == 0
+    assert seen_seeds == [11, 12, 13]
+    assert "Skipping function due to unparsable model output after 3 attempts" in caplog.text

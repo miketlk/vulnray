@@ -109,3 +109,22 @@ def test_config_llm_inference_test_flag():
     args = parser.parse_args([".", "--model", "./model.gguf", "--llm-inference-test"])
     cfg = resolve_config(args)
     assert cfg.llm_inference_test is True
+
+
+def test_config_inference_retries_default_and_cli_override():
+    parser = build_parser()
+
+    args_default = parser.parse_args([".", "--model", "./model.gguf"])
+    cfg_default = resolve_config(args_default)
+    assert cfg_default.inference.retries == 3
+
+    args = parser.parse_args([".", "--model", "./model.gguf", "--retries", "5"])
+    cfg = resolve_config(args)
+    assert cfg.inference.retries == 5
+
+
+def test_config_rejects_negative_inference_retries():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--retries", "-1"])
+    with pytest.raises(ValueError, match="inference.retries must be >= 0"):
+        resolve_config(args)

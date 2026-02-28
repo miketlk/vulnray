@@ -81,6 +81,7 @@ class LlamaBackend:
             max_tokens=params.max_tokens,
             temperature=params.temperature,
             top_p=params.top_p,
+            seed=params.seed,
         )
 
     def _from_output(

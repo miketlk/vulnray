@@ -64,6 +64,7 @@ class InferenceConfig:
     temperature: float = 0.1
     top_p: float = 0.95
     seed: int = 0
+    retries: int = 3
     metal: bool = True
     gpu_layers: int = 0
     quant: str = "q4_k_m"
@@ -167,6 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--temp", type=float)
     p.add_argument("--top-p", type=float)
     p.add_argument("--seed", type=int)
+    p.add_argument("--retries", type=int)
     p.add_argument("--metal", action="store_true")
     p.add_argument("--gpu-layers", type=int)
     p.add_argument("--max-tokens", type=int)
@@ -284,6 +286,7 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
         ("inference", "temperature"): args.temp,
         ("inference", "top_p"): args.top_p,
         ("inference", "seed"): args.seed,
+        ("inference", "retries"): args.retries,
         ("inference", "gpu_layers"): args.gpu_layers,
         ("inference", "max_tokens"): args.max_tokens,
         ("multipass", "pass1_budget"): args.pass1_budget,
@@ -359,6 +362,8 @@ def resolve_config(args: argparse.Namespace) -> Config:
 
     if cfg.inference.context <= 0:
         raise ValueError("inference.context must be > 0")
+    if cfg.inference.retries < 0:
+        raise ValueError("inference.retries must be >= 0")
     if cfg.inference.context_max is not None:
         if cfg.inference.context_max <= 0:
             raise ValueError("inference.context_max must be > 0")

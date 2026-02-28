@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -175,7 +176,7 @@ def _append_exchange_header(path: Path, entry: int, chunk: CodeChunk, deep: bool
 
 
 def _append_prompt_section(path: Path, prompt: str) -> None:
-    lines = ["Prompt:", "", "```text", prompt, "```", ""]
+    lines = ["Prompt:", "", *_fenced_text_block(prompt), ""]
     with path.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
 
@@ -206,11 +207,24 @@ def _append_inference_metadata_section(
 
 
 def _append_output_section(path: Path, output_text: str, error: str | None = None) -> None:
-    lines = ["Model Output:", "", "```text", output_text, "```", ""]
+    lines = ["Model Output:", "", *_fenced_text_block(output_text), ""]
     if error:
         lines.extend([f"Error: `{error}`", ""])
     with path.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
+
+
+def _fenced_text_block(text: str) -> list[str]:
+    max_ticks = 0
+    run = 0
+    for ch in text:
+        if ch == "`":
+            run += 1
+            max_ticks = max(max_ticks, run)
+        else:
+            run = 0
+    fence = "`" * max(3, max_ticks + 1)
+    return [f"{fence}text", text, fence]
 
 
 def run() -> int:
@@ -291,7 +305,38 @@ def run() -> int:
                 prompt_output_entry += 1
                 if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
                     _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-            result = backend.generate(prompt, mode_params(cfg, deep=deep))
+            base_params = mode_params(cfg, deep=deep)
+            max_attempts = max(1, int(cfg.inference.retries) + 1)
+            result = None
+            parsed_findings: list[Finding] | None = None
+            next_id2: int | None = None
+            last_parse_error: str | None = None
+
+            for attempt in range(max_attempts):
+                params = replace(base_params, seed=base_params.seed + attempt)
+                result = backend.generate(prompt, params)
+                if result.error:
+                    break
+                current_findings, parsed_next_id = parse_findings(result.text, chunk, start_id=next_id)
+                parse_errors = [f for f in current_findings if f.vulnerability_type == "ParserError"]
+                if not parse_errors:
+                    parsed_findings = current_findings
+                    next_id2 = parsed_next_id
+                    break
+                last_parse_error = parse_errors[0].parse_error or "unknown parse error"
+                if attempt + 1 < max_attempts:
+                    log.warning(
+                        "Unparsable model output; retrying (%s attempt %s/%s, %s:%s-%s, function=%s, seed=%s): %s",
+                        "pass2" if deep else "pass1",
+                        attempt + 1,
+                        max_attempts,
+                        chunk.file,
+                        chunk.start_line,
+                        chunk.end_line,
+                        chunk.function or "N/A",
+                        params.seed,
+                        last_parse_error,
+                    )
             if prompt_output_path is not None:
                 if cfg.logging.log_model_outputs or cfg.logging.log_prompts:
                     _append_inference_metadata_section(
@@ -303,7 +348,9 @@ def run() -> int:
                 if cfg.logging.log_prompts:
                     _append_prompt_section(prompt_output_path, prompt)
                 if cfg.logging.log_model_outputs:
-                    _append_output_section(prompt_output_path, result.text, result.error)
+                    _append_output_section(prompt_output_path, result.text if result is not None else "", result.error if result is not None else None)
+            if result is None:
+                return []
             if result.error:
                 pass_name = "pass2" if deep else "pass1"
                 log.warning(
@@ -316,9 +363,21 @@ def run() -> int:
                     result.error,
                 )
                 return []
-            findings, next_id2 = parse_findings(result.text, chunk, start_id=next_id)
+            if parsed_findings is None or next_id2 is None:
+                pass_name = "pass2" if deep else "pass1"
+                log.warning(
+                    "Skipping function due to unparsable model output after %s attempts (%s, %s:%s-%s, function=%s): %s",
+                    max_attempts,
+                    pass_name,
+                    chunk.file,
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.function or "N/A",
+                    last_parse_error or "unknown parse error",
+                )
+                return []
             next_id = next_id2
-            return findings
+            return parsed_findings
 
         def emit_findings(chunk_findings: list[Finding]) -> None:
             nonlocal emitted_count

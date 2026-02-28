@@ -87,6 +87,20 @@ You are a code security reviewer. Return ONLY JSON:
     assert findings[0].vulnerability_type == "Integer Overflow"
 
 
+def test_parse_findings_prefers_best_structured_json_over_later_noise():
+    raw = """
+{"vulnerabilities":[{"vulnerability_type":"Integer Overflow","severity":"high","confidence":0.9,"description":"d","reasoning":"r","recommendation":"fix","references":["CWE-190"]}]}
+
+Human: let's keep going
+{"vulnerabilities":[{"vulnerability_type":"NoisyTail"}]}
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].vulnerability_type == "Integer Overflow"
+
+
 def test_parse_findings_accepts_final_answer_format_yes():
     raw = """
 <reasoning>
