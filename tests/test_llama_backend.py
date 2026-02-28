@@ -170,3 +170,77 @@ def test_llama_backend_exposes_backend_library_version(tmp_path: Path, monkeypat
 
     assert backend.backend_name() == "llama-cpp-python"
     assert backend.backend_version() == "0.3.2"
+
+
+def test_llama_backend_retries_with_larger_context_on_overflow(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    created_contexts: list[int] = []
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            self.n_ctx = int(kwargs["n_ctx"])
+            created_contexts.append(self.n_ctx)
+
+        def create_completion(self, **_kwargs):
+            if self.n_ctx < 9083:
+                raise RuntimeError(f"Requested tokens (9083) exceed context window of {self.n_ctx}")
+            return {"choices": [{"text": "ok"}], "usage": {}}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    cfg.inference.context = 4096
+    backend = LlamaBackend(cfg)
+
+    result = backend.generate(
+        "scan this",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=64),
+    )
+
+    assert result.error is None
+    assert result.context_size == 9083
+    assert any("context increase: 4096 -> 9083" in e for e in result.context_events)
+    assert any("context decrease: 9083 -> 4096" in e for e in result.context_events)
+    assert result.timestamp_local is not None
+    assert created_contexts == [4096, 9083]
+
+
+def test_llama_backend_reports_error_when_context_max_exhausted(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    created_contexts: list[int] = []
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            self.n_ctx = int(kwargs["n_ctx"])
+            created_contexts.append(self.n_ctx)
+
+        def create_completion(self, **_kwargs):
+            raise RuntimeError(f"Requested tokens (12000) exceed context window of {self.n_ctx}")
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    cfg.inference.context = 4096
+    cfg.inference.context_max = 8192
+    backend = LlamaBackend(cfg)
+
+    result = backend.generate(
+        "scan this",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=64),
+    )
+
+    assert result.text == ""
+    assert result.error is not None
+    assert "Requested tokens (12000) exceed context window of 4096" in result.error
+    assert "context=8192 inference failed" in result.error
+    assert result.context_size == 4096
+    assert any("context increase: 4096 -> 8192" in e for e in result.context_events)
+    assert any("context decrease: 8192 -> 4096" in e for e in result.context_events)
+    assert result.timestamp_local is not None
+    assert created_contexts == [4096, 8192]

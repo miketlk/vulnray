@@ -57,6 +57,7 @@ class PromptConfig:
 class InferenceConfig:
     model: str | None = None
     context: int = 8192
+    context_max: int | None = None
     threads: int | None = None
     batch: int | None = None
     temperature: float = 0.1
@@ -142,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-file-bytes", type=int)
 
     p.add_argument("--context", type=int)
+    p.add_argument("--context-max", type=int)
     p.add_argument("--chunk-strategy", choices=["function", "sliding", "file"])
     p.add_argument("--chunk-tokens", type=int)
     p.add_argument("--chunk-overlap", type=int)
@@ -273,6 +275,7 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
         ("inference", "model"): args.model,
         ("inference", "quant"): args.quant,
         ("inference", "context"): args.context,
+        ("inference", "context_max"): args.context_max,
         ("inference", "threads"): args.threads,
         ("inference", "batch"): args.batch,
         ("inference", "temperature"): args.temp,
@@ -350,6 +353,14 @@ def resolve_config(args: argparse.Namespace) -> Config:
         cfg.inference.temperature = 0.0
         if cfg.inference.top_p <= 0:
             cfg.inference.top_p = 1.0
+
+    if cfg.inference.context <= 0:
+        raise ValueError("inference.context must be > 0")
+    if cfg.inference.context_max is not None:
+        if cfg.inference.context_max <= 0:
+            raise ValueError("inference.context_max must be > 0")
+        if cfg.inference.context_max < cfg.inference.context:
+            raise ValueError("inference.context_max must be >= inference.context")
 
     if cfg.scan.max_findings and cfg.scan.max_findings < 0:
         raise ValueError("scan.max_findings must be >= 0")

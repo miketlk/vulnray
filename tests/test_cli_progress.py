@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -92,7 +93,16 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
             text = log_file.read_text(encoding="utf-8")
             saw_prompt_during_generate["value"] = "Prompt:" in text
             saw_output_during_generate["value"] = "Model Output:" in text
-            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+            return InferenceResult(
+                text=json.dumps({"vulnerabilities": []}),
+                error=None,
+                timestamp_local="2026-02-28T10:11:12-08:00",
+                context_size=12288,
+                context_events=[
+                    "2026-02-28T10:11:10-08:00 context increase: 8192 -> 12288",
+                    "2026-02-28T10:11:12-08:00 context decrease: 12288 -> 8192",
+                ],
+            )
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -124,6 +134,11 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
     assert "## Exchange 1" in text
     assert "\n---\n" in text
     assert "Prompt:" in text
+    assert "Inference Metadata:" in text
+    assert "- Timestamp: `2026-02-28T10:11:12-08:00`" in text
+    assert "- Context size: `12288`" in text
+    assert "context increase: 8192 -> 12288" in text
+    assert "context decrease: 12288 -> 8192" in text
     assert "Model Output:" in text
 
 
@@ -208,3 +223,47 @@ def test_llm_inference_test_ignores_scan_path_and_reports_metrics(monkeypatch, t
     assert "tokens_per_sec:" in stdout
     assert "model_weights_memory_mb:" in stdout
     assert "memory_used_mb:" in stdout
+
+
+def test_scan_skips_chunk_when_inference_fails(monkeypatch, tmp_path: Path, capsys, caplog):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "int add(int a, int b) {\n"
+        "    return a + b;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(text="", error="llama-cpp-python failure: Requested tokens (9083) exceed context window of 8192")
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    caplog.set_level(logging.WARNING, logger="vulnllm")
+    rc = run()
+    capsys.readouterr()
+
+    assert rc == 0
+    assert "Skipping function due to inference error" in caplog.text

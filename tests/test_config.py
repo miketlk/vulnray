@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from vulnllm.config import build_parser, resolve_config
 
 
@@ -50,6 +52,21 @@ def test_config_default_gpu_layers_is_cpu_safe():
     args = parser.parse_args([".", "--model", "./model.gguf"])
     cfg = resolve_config(args)
     assert cfg.inference.gpu_layers == 0
+
+
+def test_config_context_max_from_cli():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--context", "4096", "--context-max", "16384"])
+    cfg = resolve_config(args)
+    assert cfg.inference.context == 4096
+    assert cfg.inference.context_max == 16384
+
+
+def test_config_rejects_context_max_smaller_than_context():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--context", "8192", "--context-max", "4096"])
+    with pytest.raises(ValueError, match="inference.context_max must be >= inference.context"):
+        resolve_config(args)
 
 
 def test_config_prompt_output_logging_defaults_off_and_cli_enables():

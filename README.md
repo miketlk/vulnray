@@ -34,3 +34,5 @@ Examples:
 
 - `VULNLLM_INFERENCE__MODEL=./models/model.gguf`
 - `VULNLLM_SCAN__MODE=deterministic`
+- `VULNLLM_INFERENCE__CONTEXT=8192`
+- `VULNLLM_INFERENCE__CONTEXT_MAX=32768` (optional cap for overflow retries; default is `4 * context`)

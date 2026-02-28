@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from vulnllm.chunking.function_chunker import CodeChunk, chunk_file_by_function
@@ -179,8 +180,29 @@ def _append_prompt_section(path: Path, prompt: str) -> None:
         f.write("\n".join(lines).rstrip() + "\n")
 
 
-def _append_output_section(path: Path, output_text: str, error: str | None = None) -> None:
-    lines = ["Model Output:", "", "```text", output_text, "```", ""]
+def _append_output_section(
+    path: Path,
+    output_text: str,
+    error: str | None = None,
+    *,
+    timestamp_local: str | None = None,
+    context_size: int | None = None,
+    context_events: list[str] | None = None,
+) -> None:
+    if timestamp_local is None:
+        timestamp_local = datetime.now().astimezone().isoformat(timespec="seconds")
+    lines = ["Inference Metadata:", ""]
+    if timestamp_local:
+        lines.append(f"- Timestamp: `{timestamp_local}`")
+    if context_size is not None:
+        lines.append(f"- Context size: `{context_size}`")
+    if context_events:
+        lines.append("- Context events:")
+        for event in context_events:
+            lines.append(f"  - {event}")
+    else:
+        lines.append("- Context events: none")
+    lines.extend(["", "Model Output:", "", "```text", output_text, "```", ""])
     if error:
         lines.extend([f"Error: `{error}`", ""])
     with path.open("a", encoding="utf-8") as f:
@@ -267,9 +289,26 @@ def run() -> int:
                 if cfg.logging.log_model_outputs:
                     if not cfg.logging.log_prompts:
                         _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-                    _append_output_section(prompt_output_path, result.text, result.error)
+                    _append_output_section(
+                        prompt_output_path,
+                        result.text,
+                        result.error,
+                        timestamp_local=result.timestamp_local,
+                        context_size=result.context_size or cfg.inference.context,
+                        context_events=result.context_events,
+                    )
             if result.error:
-                raise RuntimeError(result.error)
+                pass_name = "pass2" if deep else "pass1"
+                log.warning(
+                    "Skipping function due to inference error (%s, %s:%s-%s, function=%s): %s",
+                    pass_name,
+                    chunk.file,
+                    chunk.start_line,
+                    chunk.end_line,
+                    chunk.function or "N/A",
+                    result.error,
+                )
+                return []
             findings, next_id2 = parse_findings(result.text, chunk, start_id=next_id)
             next_id = next_id2
             return findings
