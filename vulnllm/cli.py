@@ -180,14 +180,12 @@ def _append_prompt_section(path: Path, prompt: str) -> None:
         f.write("\n".join(lines).rstrip() + "\n")
 
 
-def _append_output_section(
+def _append_inference_metadata_section(
     path: Path,
-    output_text: str,
-    error: str | None = None,
     *,
-    timestamp_local: str | None = None,
-    context_size: int | None = None,
-    context_events: list[str] | None = None,
+    timestamp_local: str | None,
+    context_size: int | None,
+    context_events: list[str] | None,
 ) -> None:
     if timestamp_local is None:
         timestamp_local = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -202,7 +200,13 @@ def _append_output_section(
             lines.append(f"  - {event}")
     else:
         lines.append("- Context events: none")
-    lines.extend(["", "Model Output:", "", "```text", output_text, "```", ""])
+    lines.append("")
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
+def _append_output_section(path: Path, output_text: str, error: str | None = None) -> None:
+    lines = ["Model Output:", "", "```text", output_text, "```", ""]
     if error:
         lines.extend([f"Error: `{error}`", ""])
     with path.open("a", encoding="utf-8") as f:
@@ -285,22 +289,21 @@ def run() -> int:
             prompt = build_prompt(cfg, chunk, index_context=_index_context(index, chunk))
             if prompt_output_path is not None:
                 prompt_output_entry += 1
-                if cfg.logging.log_prompts:
+                if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
                     _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-                    _append_prompt_section(prompt_output_path, prompt)
             result = backend.generate(prompt, mode_params(cfg, deep=deep))
             if prompt_output_path is not None:
-                if cfg.logging.log_model_outputs:
-                    if not cfg.logging.log_prompts:
-                        _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-                    _append_output_section(
+                if cfg.logging.log_model_outputs or cfg.logging.log_prompts:
+                    _append_inference_metadata_section(
                         prompt_output_path,
-                        result.text,
-                        result.error,
                         timestamp_local=result.timestamp_local,
                         context_size=result.context_size or cfg.inference.context,
                         context_events=result.context_events,
                     )
+                if cfg.logging.log_prompts:
+                    _append_prompt_section(prompt_output_path, prompt)
+                if cfg.logging.log_model_outputs:
+                    _append_output_section(prompt_output_path, result.text, result.error)
             if result.error:
                 pass_name = "pass2" if deep else "pass1"
                 log.warning(

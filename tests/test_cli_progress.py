@@ -127,7 +127,7 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
 
     assert rc == 0
     assert log_file.exists()
-    assert saw_prompt_during_generate["value"] is True
+    assert saw_prompt_during_generate["value"] is False
     assert saw_output_during_generate["value"] is False
     text = log_file.read_text(encoding="utf-8")
     assert "# Prompt/Model Output Log" in text
@@ -140,6 +140,7 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
     assert "context increase: 8192 -> 12288" in text
     assert "context decrease: 12288 -> 8192" in text
     assert "Model Output:" in text
+    assert text.index("Inference Metadata:") < text.index("Prompt:")
 
 
 def test_dry_run_prints_files_without_inference(monkeypatch, tmp_path: Path, capsys):
