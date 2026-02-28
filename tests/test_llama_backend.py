@@ -258,3 +258,42 @@ def test_llama_backend_reports_error_when_context_max_exhausted(tmp_path: Path, 
     assert any("context decrease: 8192 -> 4096" in e for e in result.context_events)
     assert result.timestamp_local is not None
     assert created_contexts == [4096, 8192]
+
+
+def test_llama_backend_reuses_cached_expanded_context_between_exchanges(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    created_contexts: list[int] = []
+
+    class FakeLlama:
+        def __init__(self, **kwargs):
+            self.n_ctx = int(kwargs["n_ctx"])
+            created_contexts.append(self.n_ctx)
+
+        def create_completion(self, **_kwargs):
+            if self.n_ctx < 9083:
+                raise RuntimeError(f"Requested tokens (9083) exceed context window of {self.n_ctx}")
+            return {"choices": [{"text": "ok"}], "usage": {}}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    cfg.inference.context = 4096
+    backend = LlamaBackend(cfg)
+
+    first = backend.generate(
+        "scan this",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=64),
+    )
+    second = backend.generate(
+        "scan this again",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=1, max_tokens=64),
+    )
+
+    assert first.error is None
+    assert second.error is None
+    assert first.context_size == 9083
+    assert second.context_size == 9083
+    assert created_contexts == [4096, 9083]

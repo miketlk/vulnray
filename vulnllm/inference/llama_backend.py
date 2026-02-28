@@ -35,6 +35,7 @@ class LlamaBackend:
         self._resolved_model_path = resolve_model_path(self.cfg.inference.model)
         self._base_context = int(self.cfg.inference.context)
         self._context_max = int(self.cfg.inference.context_max or (self._base_context * 4))
+        self._llm_by_context: dict[int, Any] = {}
         self._load_backend()
 
     @staticmethod
@@ -63,10 +64,12 @@ class LlamaBackend:
             self._backend_version = getattr(llama_cpp, "__version__", None)
             self._llama_cls = Llama
             self._llm = Llama(**self._llama_kwargs(n_ctx=self._base_context))
+            self._llm_by_context = {self._base_context: self._llm}
             self._load_error = None
         except Exception as e:
             self._llm = None
             self._llama_cls = None
+            self._llm_by_context = {}
             self._load_error = str(e)
 
     def backend_name(self) -> str:
@@ -134,6 +137,18 @@ class LlamaBackend:
             return None
         return next_ctx
 
+    def _get_or_create_context_llm(self, n_ctx: int) -> tuple[Any | None, str | None]:
+        if n_ctx in self._llm_by_context:
+            return self._llm_by_context[n_ctx], None
+        if self._llama_cls is None:
+            return None, "backend unavailable"
+        try:
+            llm = self._llama_cls(**self._llama_kwargs(n_ctx=n_ctx))
+        except Exception as e:
+            return None, str(e)
+        self._llm_by_context[n_ctx] = llm
+        return llm, None
+
     def _generate_with_expanded_context(
         self,
         prompt: str,
@@ -170,10 +185,9 @@ class LlamaBackend:
 
         while retry_ctx is not None:
             events.append(f"{self._now_local_iso()} context increase: {current_ctx} -> {retry_ctx}")
-            try:
-                temp_llm = self._llama_cls(**self._llama_kwargs(n_ctx=retry_ctx))
-            except Exception as e:
-                errors.append(f"context={retry_ctx} init failed: {e}")
+            temp_llm, init_error = self._get_or_create_context_llm(retry_ctx)
+            if temp_llm is None:
+                errors.append(f"context={retry_ctx} init failed: {init_error}")
                 events.append(f"{self._now_local_iso()} context decrease: {retry_ctx} -> {self._base_context}")
                 break
 
@@ -192,8 +206,6 @@ class LlamaBackend:
                 current_ctx = retry_ctx
                 retry_ctx = self._next_retry_context(current_ctx=current_ctx, required_tokens=required_tokens)
                 continue
-            finally:
-                temp_llm = None
 
         return InferenceResult(
             text="",
