@@ -230,6 +230,27 @@ def _fenced_text_block(text: str) -> list[str]:
     return [f"{fence}text", text, fence]
 
 
+def _print_processing_stats(
+    *,
+    successful_chunks: int,
+    failed_chunks: int,
+    total_exchange_tokens: int,
+    total_exchange_time_sec: float,
+    exchange_count: int,
+    total_processing_time_sec: float,
+) -> None:
+    avg_tokens_per_sec = (
+        float(total_exchange_tokens) / total_exchange_time_sec if total_exchange_time_sec > 0.0 else 0.0
+    )
+    avg_exchange_time = total_exchange_time_sec / exchange_count if exchange_count > 0 else 0.0
+    print("Processing stats")
+    print(f"successfully_processed_chunks_functions: {successful_chunks}")
+    print(f"failed_chunks_functions: {failed_chunks}")
+    print(f"average_tokens_per_second: {avg_tokens_per_sec:.2f}")
+    print(f"average_exchange_time_sec: {avg_exchange_time:.3f}")
+    print(f"total_processing_time_sec: {total_processing_time_sec:.3f}")
+
+
 def run() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -283,8 +304,14 @@ def run() -> int:
         next_id = 1
         pass1_progress = 0
         pass2_progress = 0
+        successful_chunks = 0
+        failed_chunks = 0
+        total_exchange_tokens = 0
+        total_exchange_time_sec = 0.0
+        exchange_count = 0
         progress_enabled = cfg.logging.progress and not cfg.logging.quiet
         total_chunks = len(all_chunks)
+        processing_started = time.perf_counter()
         log_prompt_io = cfg.logging.log_prompts or cfg.logging.log_model_outputs
         prompt_output_path: Path | None = None
         prompt_output_entry = 0
@@ -296,94 +323,161 @@ def run() -> int:
             prompt_output_path.write_text("# Prompt/Model Output Log\n", encoding="utf-8")
 
         def run_chunk(chunk: CodeChunk, deep: bool = False) -> list[Finding]:
-            nonlocal next_id, pass1_progress, pass2_progress, prompt_output_entry
-            if deep:
-                pass2_progress += 1
-                maybe_progress(progress_enabled, pass2_progress, total_chunks, f"{chunk.file} (pass2)")
-            else:
-                pass1_progress += 1
-                maybe_progress(progress_enabled, pass1_progress, total_chunks, f"{chunk.file} (pass1)")
-            prompt = build_prompt(cfg, chunk, index_context=_index_context(index, chunk))
-            if prompt_output_path is not None:
-                prompt_output_entry += 1
-                if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
-                    _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-            base_params = mode_params(cfg, deep=deep)
-            max_attempts = max(1, int(cfg.inference.retries) + 1)
-            result = None
-            parsed_findings: list[Finding] | None = None
-            next_id2: int | None = None
-            last_parse_error: str | None = None
-            used_seed: int | None = None
+            nonlocal next_id
+            nonlocal pass1_progress
+            nonlocal pass2_progress
+            nonlocal prompt_output_entry
+            nonlocal successful_chunks
+            nonlocal failed_chunks
+            nonlocal total_exchange_tokens
+            nonlocal total_exchange_time_sec
+            nonlocal exchange_count
+            pass_name = "pass2" if deep else "pass1"
+            try:
+                if deep:
+                    pass2_progress += 1
+                    maybe_progress(progress_enabled, pass2_progress, total_chunks, f"{chunk.file} (pass2)")
+                else:
+                    pass1_progress += 1
+                    maybe_progress(progress_enabled, pass1_progress, total_chunks, f"{chunk.file} (pass1)")
+                prompt = build_prompt(cfg, chunk, index_context=_index_context(index, chunk))
+                if prompt_output_path is not None:
+                    prompt_output_entry += 1
+                    if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
+                        _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+                base_params = mode_params(cfg, deep=deep)
+                max_attempts = max(1, int(cfg.inference.retries) + 1)
+                result = None
+                parsed_findings: list[Finding] | None = None
+                next_id2: int | None = None
+                last_parse_error: str | None = None
+                used_seed: int | None = None
 
-            for attempt in range(max_attempts):
-                params = replace(base_params, seed=base_params.seed + attempt)
-                used_seed = params.seed
-                result = backend.generate(prompt, params)
+                for attempt in range(max_attempts):
+                    params = replace(base_params, seed=base_params.seed + attempt)
+                    used_seed = params.seed
+                    t0 = time.perf_counter()
+                    try:
+                        result = backend.generate(prompt, params)
+                    except Exception as e:  # noqa: BLE001
+                        elapsed = max(0.0, time.perf_counter() - t0)
+                        total_exchange_time_sec += elapsed
+                        exchange_count += 1
+                        msg = (
+                            "Skipping function due to exchange exception "
+                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                            f"function={chunk.function or 'N/A'}): {e}"
+                        )
+                        log.exception(msg)
+                        print(msg, file=sys.stderr)
+                        failed_chunks += 1
+                        return []
+
+                    elapsed = max(0.0, time.perf_counter() - t0)
+                    total_exchange_time_sec += elapsed
+                    exchange_count += 1
+
+                    if not result.error:
+                        prompt_tokens = (
+                            result.prompt_tokens
+                            if result.prompt_tokens is not None
+                            else _approx_tokens(prompt)
+                        )
+                        completion_tokens = (
+                            result.completion_tokens
+                            if result.completion_tokens is not None
+                            else _approx_tokens(result.text, allow_zero=True)
+                        )
+                        total_tokens = (
+                            result.total_tokens
+                            if result.total_tokens is not None
+                            else prompt_tokens + completion_tokens
+                        )
+                        total_exchange_tokens += max(0, int(total_tokens))
+
+                    if result.error:
+                        break
+                    current_findings, parsed_next_id = parse_findings(result.text, chunk, start_id=next_id)
+                    parse_errors = [f for f in current_findings if f.vulnerability_type == "ParserError"]
+                    if not parse_errors:
+                        parsed_findings = current_findings
+                        next_id2 = parsed_next_id
+                        break
+                    last_parse_error = parse_errors[0].parse_error or "unknown parse error"
+                    if attempt + 1 < max_attempts:
+                        log.warning(
+                            "Unparsable model output; retrying (%s attempt %s/%s, %s:%s-%s, function=%s, seed=%s): %s",
+                            pass_name,
+                            attempt + 1,
+                            max_attempts,
+                            chunk.file,
+                            chunk.start_line,
+                            chunk.end_line,
+                            chunk.function or "N/A",
+                            params.seed,
+                            last_parse_error,
+                        )
+                if prompt_output_path is not None:
+                    if cfg.logging.log_model_outputs or cfg.logging.log_prompts:
+                        _append_inference_metadata_section(
+                            prompt_output_path,
+                            timestamp_local=result.timestamp_local if result is not None else None,
+                            context_size=(result.context_size if result is not None else None)
+                            or cfg.inference.context,
+                            context_events=result.context_events if result is not None else None,
+                            seed=used_seed,
+                        )
+                    if cfg.logging.log_prompts:
+                        _append_prompt_section(prompt_output_path, prompt)
+                    if cfg.logging.log_model_outputs:
+                        _append_output_section(
+                            prompt_output_path,
+                            result.text if result is not None else "",
+                            result.error if result is not None else None,
+                        )
+                if result is None:
+                    msg = (
+                        "Skipping function due to missing inference result "
+                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                        f"function={chunk.function or 'N/A'})"
+                    )
+                    log.warning(msg)
+                    print(msg, file=sys.stderr)
+                    failed_chunks += 1
+                    return []
                 if result.error:
-                    break
-                current_findings, parsed_next_id = parse_findings(result.text, chunk, start_id=next_id)
-                parse_errors = [f for f in current_findings if f.vulnerability_type == "ParserError"]
-                if not parse_errors:
-                    parsed_findings = current_findings
-                    next_id2 = parsed_next_id
-                    break
-                last_parse_error = parse_errors[0].parse_error or "unknown parse error"
-                if attempt + 1 < max_attempts:
-                    log.warning(
-                        "Unparsable model output; retrying (%s attempt %s/%s, %s:%s-%s, function=%s, seed=%s): %s",
-                        "pass2" if deep else "pass1",
-                        attempt + 1,
-                        max_attempts,
-                        chunk.file,
-                        chunk.start_line,
-                        chunk.end_line,
-                        chunk.function or "N/A",
-                        params.seed,
-                        last_parse_error,
+                    msg = (
+                        "Skipping function due to inference error "
+                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                        f"function={chunk.function or 'N/A'}): {result.error}"
                     )
-            if prompt_output_path is not None:
-                if cfg.logging.log_model_outputs or cfg.logging.log_prompts:
-                    _append_inference_metadata_section(
-                        prompt_output_path,
-                        timestamp_local=result.timestamp_local,
-                        context_size=result.context_size or cfg.inference.context,
-                        context_events=result.context_events,
-                        seed=used_seed,
+                    log.warning(msg)
+                    print(msg, file=sys.stderr)
+                    failed_chunks += 1
+                    return []
+                if parsed_findings is None or next_id2 is None:
+                    msg = (
+                        "Skipping function due to unparsable model output after "
+                        f"{max_attempts} attempts ({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                        f"function={chunk.function or 'N/A'}): {last_parse_error or 'unknown parse error'}"
                     )
-                if cfg.logging.log_prompts:
-                    _append_prompt_section(prompt_output_path, prompt)
-                if cfg.logging.log_model_outputs:
-                    _append_output_section(prompt_output_path, result.text if result is not None else "", result.error if result is not None else None)
-            if result is None:
-                return []
-            if result.error:
-                pass_name = "pass2" if deep else "pass1"
-                log.warning(
-                    "Skipping function due to inference error (%s, %s:%s-%s, function=%s): %s",
-                    pass_name,
-                    chunk.file,
-                    chunk.start_line,
-                    chunk.end_line,
-                    chunk.function or "N/A",
-                    result.error,
+                    log.warning(msg)
+                    print(msg, file=sys.stderr)
+                    failed_chunks += 1
+                    return []
+                next_id = next_id2
+                successful_chunks += 1
+                return parsed_findings
+            except Exception as e:  # noqa: BLE001
+                msg = (
+                    "Skipping function due to unexpected processing error "
+                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                    f"function={chunk.function or 'N/A'}): {e}"
                 )
+                log.exception(msg)
+                print(msg, file=sys.stderr)
+                failed_chunks += 1
                 return []
-            if parsed_findings is None or next_id2 is None:
-                pass_name = "pass2" if deep else "pass1"
-                log.warning(
-                    "Skipping function due to unparsable model output after %s attempts (%s, %s:%s-%s, function=%s): %s",
-                    max_attempts,
-                    pass_name,
-                    chunk.file,
-                    chunk.start_line,
-                    chunk.end_line,
-                    chunk.function or "N/A",
-                    last_parse_error or "unknown parse error",
-                )
-                return []
-            next_id = next_id2
-            return parsed_findings
 
         def emit_findings(chunk_findings: list[Finding]) -> None:
             nonlocal emitted_count
@@ -421,6 +515,16 @@ def run() -> int:
             append_json_summary(outputs["json"], findings)
         if "md" in outputs:
             append_markdown_summary_and_table(outputs["md"], cfg, findings)
+
+        total_processing_time_sec = max(0.0, time.perf_counter() - processing_started)
+        _print_processing_stats(
+            successful_chunks=successful_chunks,
+            failed_chunks=failed_chunks,
+            total_exchange_tokens=total_exchange_tokens,
+            total_exchange_time_sec=total_exchange_time_sec,
+            exchange_count=exchange_count,
+            total_processing_time_sec=total_processing_time_sec,
+        )
 
         non_parser_findings = [f for f in findings if f.vulnerability_type != "ParserError"]
         return 1 if non_parser_findings else 0

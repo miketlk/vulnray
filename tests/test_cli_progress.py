@@ -316,6 +316,109 @@ def test_scan_skips_chunk_when_inference_fails(monkeypatch, tmp_path: Path, caps
     assert "Skipping function due to inference error" in caplog.text
 
 
+def test_scan_continues_when_llm_exchange_raises_exception(monkeypatch, tmp_path: Path, capsys, caplog):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "int foo(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+        "\n"
+        "int bar(int x) {\n"
+        "    return x + 2;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+    calls = {"n": 0}
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transport timeout")
+            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    caplog.set_level(logging.WARNING, logger="vulnllm")
+    rc = run()
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    assert calls["n"] >= 2
+    assert "Skipping function due to exchange exception" in caplog.text
+    assert "Processing stats" in captured.out
+
+
+def test_scan_prints_processing_stats(monkeypatch, tmp_path: Path, capsys):
+    src = tmp_path / "main.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(
+                text=json.dumps({"vulnerabilities": []}),
+                error=None,
+                prompt_tokens=20,
+                completion_tokens=10,
+                total_tokens=30,
+            )
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    rc = run()
+    stdout = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Processing stats" in stdout
+    assert "successfully_processed_chunks_functions:" in stdout
+    assert "failed_chunks_functions:" in stdout
+    assert "average_tokens_per_second:" in stdout
+    assert "average_exchange_time_sec:" in stdout
+    assert "total_processing_time_sec:" in stdout
+
+
 def test_function_filter_scans_only_selected_function(monkeypatch, tmp_path: Path):
     src = tmp_path / "main.c"
     src.write_text(
