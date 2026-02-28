@@ -17,6 +17,12 @@ pip install -e .
 vulnray . --model ./models/VulnLLM-R-7B.Q4_K_M.gguf --output json,csv,md
 ```
 
+Scan only one function:
+
+```bash
+vulnray . --model ./models/VulnLLM-R-7B.Q4_K_M.gguf --function secp256k1_fe_mul_inner
+```
+
 LLM inference benchmark mode (skips scanning/files and exits after stats):
 
 ```bash

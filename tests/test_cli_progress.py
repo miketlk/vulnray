@@ -267,3 +267,55 @@ def test_scan_skips_chunk_when_inference_fails(monkeypatch, tmp_path: Path, caps
 
     assert rc == 0
     assert "Skipping function due to inference error" in caplog.text
+
+
+def test_function_filter_scans_only_selected_function(monkeypatch, tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "int foo(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+        "\n"
+        "int bar(int x) {\n"
+        "    return x + 2;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+    prompts: list[str] = []
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, prompt, _params):
+            prompts.append(prompt)
+            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--function",
+            "bar",
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    rc = run()
+
+    assert rc == 0
+    assert len(prompts) == 1
+    assert "int bar(int x)" in prompts[0]
+    assert "int foo(int x)" not in prompts[0]

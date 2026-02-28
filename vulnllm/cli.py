@@ -244,6 +244,10 @@ def run() -> int:
             all_chunks.extend(
                 _build_chunks(f, root, cfg.chunking.strategy, cfg.chunking.chunk_tokens, cfg.chunking.overlap)
             )
+        if cfg.scan.function:
+            all_chunks = [chunk for chunk in all_chunks if chunk.function == cfg.scan.function]
+            if not all_chunks:
+                log.warning("No chunks matched function filter: %s", cfg.scan.function)
         outputs = _collect_outputs(cfg)
         if "json" in outputs:
             init_json_report(outputs["json"], cfg, str(root.resolve()), len(files), len(all_chunks))

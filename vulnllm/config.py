@@ -24,6 +24,7 @@ class ScanConfig:
     languages: list[str] = field(default_factory=lambda: ["c"])
     multi_pass: bool = False
     max_findings: int = 0
+    function: str | None = None
 
 
 @dataclass
@@ -136,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-findings", type=int)
 
     p.add_argument("--mode", choices=["max-recall", "balanced", "deterministic"])
+    p.add_argument("--function", dest="function_name")
     p.add_argument("--lang")
     p.add_argument("--include", action="append")
     p.add_argument("--exclude", action="append")
@@ -261,6 +263,7 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
 
     mapping = {
         ("scan", "mode"): args.mode,
+        ("scan", "function"): args.function_name,
         ("scan", "max_findings"): args.max_findings,
         ("files", "include"): args.include,
         ("files", "exclude"): args.exclude,
@@ -364,6 +367,8 @@ def resolve_config(args: argparse.Namespace) -> Config:
 
     if cfg.scan.max_findings and cfg.scan.max_findings < 0:
         raise ValueError("scan.max_findings must be >= 0")
+    if cfg.scan.function is not None and not cfg.scan.function.strip():
+        raise ValueError("scan.function must not be empty")
     if not cfg.inference.model and not cfg.dry_run:
         raise ValueError("Missing required config: inference.model (set --model or TOML [inference].model)")
     if cfg.scan.mode not in {"max-recall", "balanced", "deterministic"}:
