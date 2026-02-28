@@ -10,6 +10,7 @@ from pathlib import Path
 from vulnllm.chunking.function_chunker import CodeChunk, chunk_file_by_function
 from vulnllm.chunking.sliding_chunker import chunk_file_sliding
 from vulnllm.config import build_parser, resolve_config
+from vulnllm.export_code import export_codebase_container
 from vulnllm.findings.deduplicator import deduplicate_findings
 from vulnllm.findings.model import Finding, parse_findings
 from vulnllm.inference.llama_backend import LlamaBackend
@@ -280,6 +281,11 @@ def run() -> int:
             for file_path in files:
                 rel = file_path.relative_to(root if root.is_dir() else root.parent)
                 print(str(rel).replace("\\", "/"))
+            return 0
+        if cfg.export_code:
+            export_path = Path(cfg.export_code)
+            export_codebase_container(root=root, files=files, output_path=export_path)
+            print(str(export_path))
             return 0
 
         index = None

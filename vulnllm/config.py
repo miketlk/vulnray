@@ -104,6 +104,7 @@ class Config:
     config_path: str | None = None
     output: str | None = None
     dry_run: bool = False
+    export_code: str | None = None
     llm_inference_test: bool = False
 
     scan: ScanConfig = field(default_factory=ScanConfig)
@@ -122,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("--config", dest="config_path")
     p.add_argument("--dry-run", action="store_true", help="Print matched files and exit")
+    p.add_argument(
+        "--export-code",
+        metavar="PATH",
+        help="Write matched code files into a single container file and exit",
+    )
     p.add_argument(
         "--llm-inference-test",
         action="store_true",
@@ -245,6 +251,7 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
         "path": args.path,
         "config_path": args.config_path,
         "dry_run": args.dry_run,
+        "export_code": args.export_code,
     }
 
     def sec(section: str) -> dict[str, Any]:
@@ -329,6 +336,7 @@ def _from_dict(d: dict[str, Any]) -> Config:
         path=d.get("path", "."),
         config_path=d.get("config_path"),
         dry_run=d.get("dry_run", False),
+        export_code=d.get("export_code"),
         llm_inference_test=d.get("llm_inference_test", False),
         scan=ScanConfig(**d.get("scan", {})),
         files=FilesConfig(**d.get("files", {})),
@@ -374,7 +382,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         raise ValueError("scan.max_findings must be >= 0")
     if cfg.scan.function is not None and not cfg.scan.function.strip():
         raise ValueError("scan.function must not be empty")
-    if not cfg.inference.model and not cfg.dry_run:
+    if not cfg.inference.model and not (cfg.dry_run or cfg.export_code):
         raise ValueError("Missing required config: inference.model (set --model or TOML [inference].model)")
     if cfg.scan.mode not in {"max-recall", "balanced", "deterministic"}:
         raise ValueError("scan.mode must be max-recall|balanced|deterministic")

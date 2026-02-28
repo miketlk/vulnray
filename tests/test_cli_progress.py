@@ -221,6 +221,51 @@ def test_dry_run_prints_files_without_inference(monkeypatch, tmp_path: Path, cap
     assert stdout == ["src/a.c"]
 
 
+def test_export_code_writes_container_without_inference(monkeypatch, tmp_path: Path, capsys):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.c").write_text(
+        "int main(void) {\n"
+        "  // note\n"
+        "  return 0; /* done */\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "codebase.txt"
+
+    class ShouldNotInitBackend:
+        def __init__(self, _cfg):
+            raise AssertionError("LlamaBackend should not be created in export mode")
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", ShouldNotInitBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--export-code",
+            str(out),
+            "--lang",
+            "c",
+            "--include",
+            "src/**/*.c",
+        ],
+    )
+
+    rc = run()
+    stdout = capsys.readouterr().out.strip().splitlines()
+    payload = out.read_text(encoding="utf-8")
+
+    assert rc == 0
+    assert stdout == [str(out)]
+    assert "CODEBASE_CONTAINER v1" in payload
+    assert "- path: src/a.c" in payload
+    assert "PATH: src/a.c" in payload
+    assert "> int main(void) {" in payload
+    assert "note" not in payload
+    assert "done" not in payload
+
+
 def test_llm_inference_test_ignores_scan_path_and_reports_metrics(monkeypatch, tmp_path: Path, capsys):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"GGUF")

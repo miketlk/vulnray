@@ -104,6 +104,14 @@ def test_config_dry_run_does_not_require_model():
     assert cfg.dry_run is True
 
 
+def test_config_export_code_does_not_require_model(tmp_path: Path):
+    parser = build_parser()
+    out = tmp_path / "codebase.txt"
+    args = parser.parse_args([".", "--export-code", str(out)])
+    cfg = resolve_config(args)
+    assert cfg.export_code == str(out)
+
+
 def test_config_llm_inference_test_flag():
     parser = build_parser()
     args = parser.parse_args([".", "--model", "./model.gguf", "--llm-inference-test"])
