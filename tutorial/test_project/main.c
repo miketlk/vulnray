@@ -1,4 +1,5 @@
-#include "include/user_store.h"
+#include "user_store.h"
+#include "scan_skip_prototypes.h"
 
 #include <stdio.h>
 #include <string.h>
