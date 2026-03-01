@@ -1,12 +1,31 @@
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
 
 from vulnllm.cli import run
 from vulnllm.inference.llama_backend import InferenceResult
+
+
+def _compact_yes(vuln_type: str, *, confidence: str = "high", why: str = "detected issue") -> str:
+    return (
+        f"#judge: yes\n"
+        f"#type: {vuln_type}\n"
+        f"#confidence: {confidence}\n"
+        f"#need_context: N/A\n"
+        f"#why: {why}"
+    )
+
+
+def _compact_no(*, why: str = "no vulnerability found") -> str:
+    return (
+        "#judge: no\n"
+        "#type: N/A\n"
+        "#confidence: high\n"
+        "#need_context: N/A\n"
+        f"#why: {why}"
+    )
 
 
 def test_progress_prints_during_multipass(monkeypatch, tmp_path: Path, capsys):
@@ -26,26 +45,7 @@ def test_progress_prints_during_multipass(monkeypatch, tmp_path: Path, capsys):
             pass
 
         def generate(self, _prompt, _params):
-            return InferenceResult(
-                text=json.dumps(
-                    {
-                        "vulnerabilities": [
-                            {
-                                "vulnerability_type": "Test",
-                                "severity": "low",
-                                "confidence": 0.5,
-                                "description": "d",
-                                "reasoning": "r",
-                                "exploitability": "practical",
-                                "attacker_controlled_input": True,
-                                "evidence_spans": 1,
-                                "recommendation": "x",
-                                "references": ["CWE-000"],
-                            }
-                        ]
-                    }
-                )
-            )
+            return InferenceResult(text=_compact_yes("CWE-200", confidence="medium", why="test finding"))
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -97,7 +97,7 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
             saw_prompt_during_generate["value"] = "### Prompt" in text
             saw_output_during_generate["value"] = "### Model Output" in text
             return InferenceResult(
-                text=json.dumps({"vulnerabilities": []}),
+                text=_compact_no(),
                 error=None,
                 timestamp_local="2026-02-28T10:11:12-08:00",
                 context_size=12288,
@@ -161,7 +161,7 @@ def test_prompt_output_log_uses_safe_fence_for_embedded_backticks(monkeypatch, t
 
         def generate(self, _prompt, _params):
             return InferenceResult(
-                text='JSON output:\n```json\n{"vulnerabilities":[]}\n```',
+                text='Output:\n```text\n#judge: no\n#type: N/A\n#confidence: high\n#need_context: N/A\n#why: none\n```',
                 error=None,
             )
 
@@ -285,7 +285,7 @@ def test_llm_inference_test_ignores_scan_path_and_reports_metrics(monkeypatch, t
 
         def generate(self, _prompt, _params):
             return InferenceResult(
-                text='{"vulnerabilities":[]}',
+                text=_compact_no(),
                 prompt_tokens=20,
                 completion_tokens=40,
                 total_tokens=60,
@@ -389,7 +389,7 @@ def test_scan_continues_when_llm_exchange_raises_exception(monkeypatch, tmp_path
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("transport timeout")
-            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+            return InferenceResult(text=_compact_no(), error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -431,7 +431,7 @@ def test_scan_prints_processing_stats(monkeypatch, tmp_path: Path, capsys):
 
         def generate(self, _prompt, _params):
             return InferenceResult(
-                text=json.dumps({"vulnerabilities": []}),
+                text=_compact_no(),
                 error=None,
                 prompt_tokens=20,
                 completion_tokens=10,
@@ -491,7 +491,7 @@ def test_function_filter_scans_only_selected_function(monkeypatch, tmp_path: Pat
 
         def generate(self, prompt, _params):
             prompts.append(prompt)
-            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+            return InferenceResult(text=_compact_no(), error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -536,7 +536,7 @@ def test_scan_marks_chunk_unresolved_on_unparsable_output_without_retry(monkeypa
         def generate(self, _prompt, params):
             calls["n"] += 1
             seen_seeds.append(params.seed)
-            return InferenceResult(text="not-json", error=None)
+            return InferenceResult(text="invalid-output", error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -586,23 +586,9 @@ def test_scan_retries_unparsable_output_with_different_seed(monkeypatch, tmp_pat
             calls["n"] += 1
             seen_seeds.append(params.seed)
             if calls["n"] == 1:
-                return InferenceResult(text="not-json", error=None)
+                return InferenceResult(text="invalid-output", error=None)
             return InferenceResult(
-                text=json.dumps(
-                    {
-                        "vulnerabilities": [
-                            {
-                                "vulnerability_type": "CWE-190",
-                                "severity": "medium",
-                                "confidence": 0.7,
-                                "description": "d",
-                                "reasoning": "r",
-                                "recommendation": "fix",
-                                "references": ["CWE-190"],
-                            }
-                        ]
-                    }
-                ),
+                text=_compact_yes("CWE-190", confidence="medium", why="d"),
                 error=None,
             )
 
@@ -656,7 +642,7 @@ def test_scan_uses_heuristic_fallback_for_unparsable_unsafe_sink(monkeypatch, tm
             pass
 
         def generate(self, _prompt, _params):
-            return InferenceResult(text="not-json", error=None)
+            return InferenceResult(text="invalid-output", error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -682,7 +668,7 @@ def test_scan_uses_heuristic_fallback_for_unparsable_unsafe_sink(monkeypatch, tm
     assert "CWE-22" in report
 
 
-def test_scan_repairs_unparsable_json_output_locally(monkeypatch, tmp_path: Path, caplog):
+def test_scan_accepts_compact_output_wrapped_in_fence(monkeypatch, tmp_path: Path, caplog):
     src = tmp_path / "main.c"
     src.write_text(
         "int add(size_t size, int a, int b) {\n"
@@ -704,7 +690,7 @@ def test_scan_repairs_unparsable_json_output_locally(monkeypatch, tmp_path: Path
         def generate(self, _prompt, params):
             seen_seeds.append(params.seed)
             return InferenceResult(
-                text='```json\n{"vulnerabilities":[{"vulnerability_type":"CWE-190","severity":"high","confidence":0.8,"description":"d","reasoning":"r","recommendation":"fix","references":["CWE-190"],"evidence_spans":1,"exploitability":"practical","attacker_controlled_input":true,"bounds_contradiction_evidence":true}],}\n```',
+                text="```text\n#judge: yes\n#type: CWE-200\n#confidence: high\n#need_context: N/A\n#why: d\n```",
                 error=None,
             )
 
@@ -752,28 +738,7 @@ def test_scan_accepts_findings_without_evidence_spans_after_gate_relaxation(monk
             pass
 
         def generate(self, _prompt, _params):
-            return InferenceResult(
-                text=json.dumps(
-                    {
-                        "vulnerabilities": [
-                            {
-                                "vulnerability_type": "CWE-120",
-                                "severity": "high",
-                                "confidence": 0.8,
-                                "description": "d",
-                                "reasoning": "r",
-                                "recommendation": "fix",
-                                "references": ["CWE-120"],
-                                "exploitability": "practical",
-                                "attacker_controlled_input": True,
-                                "bounds_contradiction_evidence": True,
-                                "evidence_spans": 0,
-                            }
-                        ]
-                    }
-                ),
-                error=None,
-            )
+            return InferenceResult(text=_compact_yes("CWE-120", why="d"), error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -808,27 +773,7 @@ def test_scan_drops_memory_cwe_without_local_memory_evidence(monkeypatch, tmp_pa
             pass
 
         def generate(self, _prompt, _params):
-            return InferenceResult(
-                text=json.dumps(
-                    {
-                        "vulnerabilities": [
-                            {
-                                "vulnerability_type": "CWE-120",
-                                "severity": "high",
-                                "confidence": 0.8,
-                                "description": "d",
-                                "reasoning": "r",
-                                "recommendation": "fix",
-                                "references": ["CWE-120"],
-                                "exploitability": "practical",
-                                "attacker_controlled_input": True,
-                                "evidence_spans": 0,
-                            }
-                        ]
-                    }
-                ),
-                error=None,
-            )
+            return InferenceResult(text=_compact_yes("CWE-120", why="d"), error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -853,7 +798,7 @@ def test_scan_drops_memory_cwe_without_local_memory_evidence(monkeypatch, tmp_pa
 
 def test_scan_accepts_calibrated_cwe_without_bounds_contradiction_after_gate_relaxation(monkeypatch, tmp_path: Path):
     src = tmp_path / "main.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    src.write_text("int mul(int a, int b) { return a * b; }\n", encoding="utf-8")
     model = tmp_path / "model.gguf"
     model.write_bytes(b"GGUF")
     out_dir = tmp_path / "reports"
@@ -863,28 +808,7 @@ def test_scan_accepts_calibrated_cwe_without_bounds_contradiction_after_gate_rel
             pass
 
         def generate(self, _prompt, _params):
-            return InferenceResult(
-                text=json.dumps(
-                    {
-                        "vulnerabilities": [
-                            {
-                                "vulnerability_type": "CWE-190",
-                                "severity": "high",
-                                "confidence": 0.8,
-                                "description": "d",
-                                "reasoning": "r",
-                                "recommendation": "fix",
-                                "references": ["CWE-190"],
-                                "exploitability": "practical",
-                                "attacker_controlled_input": True,
-                                "evidence_spans": 1,
-                                "bounds_contradiction_evidence": False,
-                            }
-                        ]
-                    }
-                ),
-                error=None,
-            )
+            return InferenceResult(text=_compact_yes("CWE-190", why="d"), error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(

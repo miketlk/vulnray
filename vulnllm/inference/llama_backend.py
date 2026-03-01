@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from vulnllm.config import Config
+from vulnllm.findings.compact_block import extract_complete_sane_compact_block
 from vulnllm.inference.parameters import GenerationParams
 from vulnllm.utils.model_paths import resolve_model_path
 
@@ -79,20 +80,72 @@ class LlamaBackend:
         return self._backend_version or "unknown"
 
     def _create_completion(self, llm: Any, prompt: str, params: GenerationParams) -> dict[str, Any]:
+        stop_sequences = [
+            "\n## Explanation",
+            "\nOutput format",
+            "\n```",
+        ]
+        if "#judge: yes|no" in prompt and "#type: CWE-xx|N/A" in prompt:
+            streamed = self._create_completion_with_early_termination(
+                llm=llm,
+                prompt=prompt,
+                params=params,
+                stop=stop_sequences,
+            )
+            if streamed is not None:
+                return streamed
+
         return llm.create_completion(
             prompt=prompt,
             max_tokens=params.max_tokens,
             temperature=params.temperature,
             top_p=params.top_p,
             seed=params.seed,
-            stop=[
-                "END_FINDINGS_JSON",
-                "\n## Explanation",
-                "\nThe JSON output",
-                "\n``` ```json",
-                "\n\nJSON output:",
-            ],
+            stop=stop_sequences,
         )
+
+    def _create_completion_with_early_termination(
+        self,
+        *,
+        llm: Any,
+        prompt: str,
+        params: GenerationParams,
+        stop: list[str],
+    ) -> dict[str, Any] | None:
+        try:
+            stream = llm.create_completion(
+                prompt=prompt,
+                max_tokens=params.max_tokens,
+                temperature=params.temperature,
+                top_p=params.top_p,
+                seed=params.seed,
+                stop=stop,
+                stream=True,
+            )
+        except TypeError:
+            # Backends without streaming support fall back to standard completion.
+            return None
+
+        chunks: list[str] = []
+        for delta in stream:
+            text = ""
+            if isinstance(delta, dict):
+                choices = delta.get("choices")
+                if isinstance(choices, list) and choices:
+                    first = choices[0]
+                    if isinstance(first, dict):
+                        text = str(first.get("text", ""))
+            if text:
+                chunks.append(text)
+                candidate = extract_complete_sane_compact_block(
+                    "".join(chunks),
+                    allow_early_negative_without_context=True,
+                    require_clean_prefix_for_early_negative=True,
+                )
+                if candidate is not None:
+                    return {"choices": [{"text": candidate}], "usage": {}}
+
+        return {"choices": [{"text": "".join(chunks)}], "usage": {}}
 
     def _from_output(
         self,

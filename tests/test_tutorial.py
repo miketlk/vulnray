@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -18,7 +17,10 @@ def test_tutorial_command_generates_all_reports_with_python_backend(monkeypatch,
             pass
 
         def generate(self, _prompt, _params):
-            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+            return InferenceResult(
+                text="#judge: no\n#type: N/A\n#confidence: high\n#need_context: N/A\n#why: no vulnerability found",
+                error=None,
+            )
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(

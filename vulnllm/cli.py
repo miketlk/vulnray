@@ -13,7 +13,7 @@ from vulnllm.chunking.sliding_chunker import chunk_file_sliding
 from vulnllm.config import build_parser, resolve_config
 from vulnllm.export_code import export_codebase_container
 from vulnllm.findings.deduplicator import deduplicate_findings
-from vulnllm.findings.model import Finding, extract_decision_metadata, parse_findings
+from vulnllm.findings.model import Finding, parse_findings
 from vulnllm.inference.llama_backend import LlamaBackend
 from vulnllm.inference.multipass import run_scan_multipass
 from vulnllm.inference.parameters import mode_params
@@ -66,7 +66,9 @@ def _backend_name_and_version(backend: object) -> tuple[str, str]:
 def _run_llm_inference_test(cfg) -> int:
     prompt = (
         "You are an advanced vulnerability detection model.\n"
-        "Analyze the target function and return ONLY JSON with keys final_answer and vulnerabilities.\n"
+        "Analyze the target function and output only this format:\n"
+        "#judge: yes|no\n#type: CWE-xx|N/A\n#confidence: low|medium|high\n"
+        "#need_context: N/A|symbol_a,symbol_b\n#why: one short sentence\n"
         "```c\n"
         "// context\n"
         "// N/A\n"
@@ -77,7 +79,7 @@ def _run_llm_inference_test(cfg) -> int:
         "    strcpy(dst, buf);\n"
         "}\n"
         "```\n"
-        'If vulnerable, use one CWE in final_answer.type; otherwise set final_answer.type to "N/A".'
+        "No JSON and no markdown fences in output."
     )
     rss_before = _peak_rss_mb()
     backend = LlamaBackend(cfg)
@@ -143,54 +145,6 @@ def _index_context(index: ProjectIndex | None, chunk: CodeChunk) -> str:
     if not refs:
         return ""
     return "Known symbol locations:\n" + "\n".join(f"- {f}:{line}" for f, line in refs[:5])
-
-
-def _requested_symbol_context(index: ProjectIndex | None, symbols: list[str]) -> str:
-    if index is None or not symbols:
-        return ""
-    lines: list[str] = []
-    for symbol in symbols[:8]:
-        refs = index.query_symbol(symbol)
-        definition = index.get_function_definition(symbol, max_lines=16)
-        lines.append(f"- {symbol}:")
-        if refs:
-            for file_name, line in refs[:3]:
-                lines.append(f"  - location: {file_name}:{line}")
-        if definition:
-            indented = definition.replace("\n", "\n    ")
-            lines.append(f"  - get_function_definition:\n    {indented}")
-    if not lines:
-        return ""
-    return "Requested symbol context:\n" + "\n".join(lines)
-
-
-def _build_dual_step_verifier_prompt(
-    cfg,
-    chunk: CodeChunk,
-    *,
-    base_context: str,
-    requested_context: str,
-    exchange1_output: str,
-    candidate_cwes: list[str],
-) -> str:
-    policy = candidate_cwes[:5] or ["N/A"]
-    policy_text = ", ".join(policy)
-    verifier_focus = (
-        "Verifier pass constraints:\n"
-        f"- Candidate CWE policy (no expansion): {policy_text}\n"
-        "- Confirm, downgrade, or reject exchange-1 findings only.\n"
-        "- Keep final_answer.type within candidate policy or N/A.\n"
-        "- Do not add new CWE classes.\n"
-        "- Output ONLY final reportable findings JSON.\n"
-    )
-    merged_context = base_context.strip()
-    if requested_context.strip():
-        merged_context = "\n\n".join([merged_context, requested_context.strip()]).strip()
-    prompt = build_prompt(cfg, chunk, index_context=merged_context)
-    return (
-        f"{prompt}\n\n{verifier_focus}\n"
-        f"Exchange-1 model output to verify:\n```json\n{exchange1_output}\n```\n"
-    )
 
 
 def _normalize_exploitability_classification(findings: list[Finding]) -> list[Finding]:
@@ -276,22 +230,6 @@ def _normalize_cwe_and_apply_local_evidence_gate(
                 continue
 
         out.append(finding)
-    return out
-
-
-def _filter_by_candidate_policy(findings: list[Finding], candidate_cwes: list[str]) -> list[Finding]:
-    policy = {cwe.upper() for cwe in candidate_cwes if cwe}
-    if not policy:
-        return findings
-    out: list[Finding] = []
-    for finding in findings:
-        vuln_type = (finding.vulnerability_type or "").upper()
-        if vuln_type in policy:
-            out.append(finding)
-            continue
-        refs = {ref.upper() for ref in finding.references}
-        if refs & policy:
-            out.append(finding)
     return out
 
 
@@ -836,198 +774,6 @@ def run() -> int:
 
                 parsed_findings = _normalize_exploitability_classification(parsed_findings)
                 parsed_findings = _normalize_cwe_and_apply_local_evidence_gate(parsed_findings, chunk=chunk)
-
-                if cfg.scan.dual_step:
-                    candidate_cwes, missing_symbols = extract_decision_metadata(result.text)
-                    verifier_context = _requested_symbol_context(index, missing_symbols)
-                    verifier_prompt = _build_dual_step_verifier_prompt(
-                        cfg,
-                        chunk,
-                        base_context=base_index_context,
-                        requested_context=verifier_context,
-                        exchange1_output=result.text,
-                        candidate_cwes=candidate_cwes,
-                    )
-                    verifier_params = replace(base_params, temperature=0.0, seed=base_params.seed)
-                    used_seed = verifier_params.seed
-                    t1 = time.perf_counter()
-                    try:
-                        verifier_result = backend.generate(verifier_prompt, verifier_params)
-                    except Exception as e:  # noqa: BLE001
-                        elapsed2 = max(0.0, time.perf_counter() - t1)
-                        total_exchange_time_sec += elapsed2
-                        exchange_count += 1
-                        msg = (
-                            "Skipping function due to verifier exception "
-                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                            f"function={chunk.function or 'N/A'}): {e}"
-                        )
-                        log.exception(msg)
-                        print(msg, file=sys.stderr)
-                        failed_chunks += 1
-                        return []
-                    elapsed2 = max(0.0, time.perf_counter() - t1)
-                    total_exchange_time_sec += elapsed2
-                    exchange_count += 1
-                    if prompt_output_path is not None:
-                        prompt_output_entry += 1
-                        if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
-                            _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-                            _append_inference_metadata_section(
-                                prompt_output_path,
-                                timestamp_local=verifier_result.timestamp_local,
-                                context_size=(verifier_result.context_size or cfg.inference.context),
-                                context_events=verifier_result.context_events,
-                                seed=used_seed,
-                            )
-                        if cfg.logging.log_prompts:
-                            _append_prompt_section(prompt_output_path, verifier_prompt)
-                        if cfg.logging.log_model_outputs:
-                            _append_output_section(
-                                prompt_output_path,
-                                verifier_result.text,
-                                verifier_result.error,
-                            )
-
-                    if not verifier_result.error:
-                        prompt_tokens2 = (
-                            verifier_result.prompt_tokens
-                            if verifier_result.prompt_tokens is not None
-                            else _approx_tokens(verifier_prompt)
-                        )
-                        completion_tokens2 = (
-                            verifier_result.completion_tokens
-                            if verifier_result.completion_tokens is not None
-                            else _approx_tokens(verifier_result.text, allow_zero=True)
-                        )
-                        total_tokens2 = (
-                            verifier_result.total_tokens
-                            if verifier_result.total_tokens is not None
-                            else prompt_tokens2 + completion_tokens2
-                        )
-                        total_exchange_tokens += max(0, int(total_tokens2))
-
-                    if verifier_result.error:
-                        msg = (
-                            "Skipping function due to verifier inference error "
-                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                            f"function={chunk.function or 'N/A'}): {verifier_result.error}"
-                        )
-                        log.warning(msg)
-                        print(msg, file=sys.stderr)
-                        failed_chunks += 1
-                        return []
-
-                    parsed_findings, next_id2 = parse_findings(verifier_result.text, chunk, start_id=next_id)
-                    parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
-                    if parse_errors:
-                        max_retries = max(0, int(cfg.inference.retries))
-                        base_seed = int(verifier_params.seed)
-                        for retry_attempt in range(1, max_retries + 1):
-                            retry_seed = base_seed + retry_attempt
-                            msg = (
-                                "Unparsable verifier output; retrying with different seed "
-                                f"(attempt {retry_attempt}/{max_retries}, seed={retry_seed}) "
-                                f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                                f"function={chunk.function or 'N/A'})"
-                            )
-                            log.warning(msg)
-                            print(msg, file=sys.stderr)
-
-                            retry_params = replace(verifier_params, seed=retry_seed)
-                            used_seed = retry_seed
-                            t_retry = time.perf_counter()
-                            try:
-                                retry_result = backend.generate(verifier_prompt, retry_params)
-                            except Exception as e:  # noqa: BLE001
-                                elapsed_retry = max(0.0, time.perf_counter() - t_retry)
-                                total_exchange_time_sec += elapsed_retry
-                                exchange_count += 1
-                                msg = (
-                                    "Skipping verifier parse-retry attempt due to exchange exception "
-                                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                                    f"function={chunk.function or 'N/A'}, seed={retry_seed}): {e}"
-                                )
-                                log.exception(msg)
-                                print(msg, file=sys.stderr)
-                                continue
-
-                            elapsed_retry = max(0.0, time.perf_counter() - t_retry)
-                            total_exchange_time_sec += elapsed_retry
-                            exchange_count += 1
-                            if not retry_result.error:
-                                retry_prompt_tokens = (
-                                    retry_result.prompt_tokens
-                                    if retry_result.prompt_tokens is not None
-                                    else _approx_tokens(verifier_prompt)
-                                )
-                                retry_completion_tokens = (
-                                    retry_result.completion_tokens
-                                    if retry_result.completion_tokens is not None
-                                    else _approx_tokens(retry_result.text, allow_zero=True)
-                                )
-                                retry_total_tokens = (
-                                    retry_result.total_tokens
-                                    if retry_result.total_tokens is not None
-                                    else retry_prompt_tokens + retry_completion_tokens
-                                )
-                                total_exchange_tokens += max(0, int(retry_total_tokens))
-
-                            if prompt_output_path is not None:
-                                prompt_output_entry += 1
-                                if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
-                                    _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-                                    _append_inference_metadata_section(
-                                        prompt_output_path,
-                                        timestamp_local=retry_result.timestamp_local,
-                                        context_size=(retry_result.context_size or cfg.inference.context),
-                                        context_events=retry_result.context_events,
-                                        seed=retry_seed,
-                                    )
-                                if cfg.logging.log_prompts:
-                                    _append_prompt_section(prompt_output_path, verifier_prompt)
-                                if cfg.logging.log_model_outputs:
-                                    _append_output_section(
-                                        prompt_output_path,
-                                        retry_result.text,
-                                        retry_result.error,
-                                    )
-
-                            if retry_result.error:
-                                msg = (
-                                    "Skipping verifier parse-retry attempt due to inference error "
-                                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                                    f"function={chunk.function or 'N/A'}, seed={retry_seed}): {retry_result.error}"
-                                )
-                                log.warning(msg)
-                                print(msg, file=sys.stderr)
-                                continue
-
-                            parsed_findings, next_id2 = parse_findings(retry_result.text, chunk, start_id=next_id)
-                            parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
-                            if not parse_errors:
-                                verifier_result = retry_result
-                                break
-
-                        if parse_errors:
-                            parse_error = parse_errors[0].parse_error or "unknown parse error"
-                            msg = (
-                                "Marking chunk unresolved due to unparsable verifier output "
-                                f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                                f"function={chunk.function or 'N/A'}): {parse_error}"
-                            )
-                            log.warning(msg)
-                            print(msg, file=sys.stderr)
-                            fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
-                            if fallback_findings:
-                                next_id = fallback_next_id
-                                successful_chunks += 1
-                                return fallback_findings
-                            failed_chunks += 1
-                            return []
-                    parsed_findings = _normalize_exploitability_classification(parsed_findings)
-                    parsed_findings = _normalize_cwe_and_apply_local_evidence_gate(parsed_findings, chunk=chunk)
-                    parsed_findings = _filter_by_candidate_policy(parsed_findings, candidate_cwes)
                 if parsed_findings:
                     parsed_findings, next_id2 = _augment_with_heuristic_findings(parsed_findings, chunk, next_id2)
                 parsed_findings = _apply_phase15_acceptance_gates(

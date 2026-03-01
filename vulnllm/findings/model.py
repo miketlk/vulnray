@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 
 from vulnllm.chunking.function_chunker import CodeChunk
+from vulnllm.findings.compact_block import (
+    compact_decision_to_payload,
+    extract_complete_sane_compact_block,
+    extract_last_compact_decision,
+)
 from vulnllm.findings.severity import normalize_severity
 
 
@@ -84,182 +88,36 @@ def _normalize_exploitability(value: object) -> str:
     return "theoretical"
 
 
-def _extract_json(raw: str) -> dict:
-    raw = raw.strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-
-    # Backup protocol
-    begin = raw.find("BEGIN_FINDINGS_JSON")
-    end = raw.find("END_FINDINGS_JSON")
-    if begin != -1 and end != -1 and end > begin:
-        block = raw[begin + len("BEGIN_FINDINGS_JSON") : end].strip()
-        return json.loads(block)
-
-    decoder = json.JSONDecoder()
-    idx = 0
-    while True:
-        idx = raw.find("{", idx)
-        if idx == -1:
-            break
-        try:
-            obj, _ = decoder.raw_decode(raw, idx)
-        except json.JSONDecodeError:
-            idx += 1
-            continue
-        if isinstance(obj, dict) and _is_schema_valid_json_object(obj):
-            return obj
-        idx += 1
-    repaired = _repair_json_payload(raw)
-    if repaired is not None and _is_schema_valid_json_object(repaired):
-        return repaired
-    raise ValueError("No JSON object found")
-
-
-def _repair_json_payload(raw: str) -> dict | None:
-    text = raw.strip()
-    if not text:
-        return None
-
-    if "```" in text:
-        text = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).replace("```", "").strip()
-    if not text:
-        return None
-
-    start = text.find("{")
-    if start == -1:
-        return None
-    candidate = text[start:]
-    # Conservative local repair for common tailing-comma JSON issues.
-    candidate = re.sub(r",(\s*[}\]])", r"\1", candidate)
-    # Repair common duplicated list terminator seen in noisy generations.
-    candidate = re.sub(r"\]\s*\]\s*}", "]}", candidate)
-    decoder = json.JSONDecoder()
-    try:
-        obj, _ = decoder.raw_decode(candidate)
-    except json.JSONDecodeError:
-        return None
-    return obj if isinstance(obj, dict) else None
-
-
-def _is_schema_valid_json_object(obj: dict) -> bool:
-    vulns = obj.get("vulnerabilities")
-    if not isinstance(vulns, list):
-        return False
-
-    final_answer = obj.get("final_answer")
-    has_valid_final_answer = (
-        isinstance(final_answer, dict)
-        and isinstance(final_answer.get("judge"), str)
-        and isinstance(final_answer.get("type"), str)
-    )
-    has_policy_metadata = isinstance(obj.get("candidate_cwes"), list) or isinstance(
-        obj.get("missing_context_symbols"), list
-    )
-
-    if not vulns:
-        return has_valid_final_answer or has_policy_metadata
-
-    for item in vulns:
-        if not isinstance(item, dict):
-            return False
-        # Keep schema checks permissive: many model outputs omit optional fields,
-        # and downstream normalization fills defaults.
-        if "vulnerability_type" not in item:
-            return False
-        if not any(
-            key in item
-            for key in (
-                "severity",
-                "description",
-                "reasoning",
-                "recommendation",
-                "references",
-                "confidence",
-            )
-        ):
-            return False
-    return True
-
-
-def _extract_final_answer_format(raw: str) -> dict | None:
-    judge_matches = list(re.finditer(r"(?im)^\s*#judge:\s*(yes|no)\s*$", raw))
-    type_matches = list(re.finditer(r"(?im)^\s*#type:\s*([^\n\r]+)\s*$", raw))
-    if not judge_matches or not type_matches:
-        return None
-
-    # Use the last emitted pair to reduce damage from repeated/noisy intermediate blocks.
-    judge_match = judge_matches[-1]
-    type_match = next((m for m in reversed(type_matches) if m.start() >= judge_match.start()), type_matches[-1])
-
-    tail = raw[judge_match.start() :]
-    conf_match = re.search(r"(?im)^\s*#confidence:\s*(low|medium|high)\s*$", tail)
-    why_match = re.search(r"(?im)^\s*#why:\s*([^\n\r]+)\s*$", tail)
-    ctx_match = re.search(r"(?im)^\s*#need_context:\s*([^\n\r]+)\s*$", tail)
-
-    judge = judge_match.group(1).strip().lower()
-    vuln_type = type_match.group(1).strip()
-    confidence_label = conf_match.group(1).strip().lower() if conf_match else "medium"
-    confidence = {"low": 0.5, "medium": 0.7, "high": 0.9}.get(confidence_label, 0.7)
-    why = why_match.group(1).strip() if why_match else "Parsed from compact #judge/#type output."
-    need_context = ctx_match.group(1).strip() if ctx_match else "N/A"
-    missing_symbols = []
-    if need_context and need_context.upper() != "N/A":
-        missing_symbols = [x.strip() for x in need_context.split(",") if x.strip()]
-    if judge == "no":
-        return {"missing_context_symbols": missing_symbols, "vulnerabilities": []}
-
-    if vuln_type.upper() == "N/A":
-        vuln_type = "Potential Vulnerability"
-    cwe = vuln_type.upper() if vuln_type.upper().startswith("CWE-") else ""
-    return {
-        "candidate_cwes": [cwe] if cwe else [],
-        "missing_context_symbols": missing_symbols,
-        "vulnerabilities": [
-            {
-                "vulnerability_type": vuln_type,
-                "severity": "medium",
-                "confidence": confidence,
-                "description": why,
-                "reasoning": why,
-                "recommendation": "Manually review and confirm exploitability.",
-                "references": [cwe] if cwe else [],
-            }
-        ]
-    }
+def extract_complete_sane_formatted_output_block(raw: str) -> str | None:
+    return extract_complete_sane_compact_block(raw, allow_early_negative_without_context=True)
 
 
 def extract_decision_metadata(raw: str) -> tuple[list[str], list[str]]:
-    try:
-        obj = _extract_json(raw)
-    except Exception:
-        parsed = _extract_final_answer_format(raw)
-        if parsed is None:
-            return [], []
-        candidate_cwes = parsed.get("candidate_cwes", [])
-        missing_context_symbols = parsed.get("missing_context_symbols", [])
-    else:
-        candidate_cwes = obj.get("candidate_cwes", [])
-        missing_context_symbols = obj.get("missing_context_symbols", [])
+    decision = extract_last_compact_decision(
+        raw,
+        require_complete_why_line=False,
+        allow_early_negative_without_context=True,
+    )
+    if decision is None:
+        return [], []
 
-    cwes = [str(x).strip().upper() for x in candidate_cwes if str(x).strip()]
-    symbols = [str(x).strip() for x in missing_context_symbols if str(x).strip()]
+    vuln_type = decision.vuln_type.strip()
+    cwes = [vuln_type.upper()] if vuln_type.upper().startswith("CWE-") else []
+    symbols = [str(x).strip() for x in decision.need_context_symbols if str(x).strip()]
     return cwes, symbols
 
 
 def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
     try:
-        try:
-            compact_obj = _extract_final_answer_format(raw)
-            if compact_obj is not None:
-                obj = compact_obj
-            else:
-                obj = _extract_json(raw)
-        except ValueError:
-            raise
+        decision = extract_last_compact_decision(
+            raw,
+            require_complete_why_line=False,
+            allow_early_negative_without_context=True,
+        )
+        if decision is None:
+            raise ValueError("No valid compact output block found")
+        obj = compact_decision_to_payload(decision)
         vulns = obj.get("vulnerabilities", [])
         if not isinstance(vulns, list):
             raise ValueError("vulnerabilities must be list")

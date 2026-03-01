@@ -37,52 +37,6 @@ Rules:
 """.strip()
 
 
-SYSTEM_PROMPT_DUAL_STEP = """
-You are a vulnerability detection model for C/C++ code.
-Analyze one target function with optional helper context.
-Input sections are separated by:
-- // context
-- // target function
-
-Return one JSON payload:
-BEGIN_FINDINGS_JSON
-{
-  "candidate_cwes": ["CWE-xx", "CWE-yy"],
-  "final_answer": {
-    "judge": "yes|no",
-    "type": "CWE-xx|N/A"
-  },
-  "missing_context_symbols": ["symbol_name"],
-  "vulnerabilities": [
-    {
-      "vulnerability_type": "CWE-xx",
-      "severity": "low|medium|high|critical",
-      "confidence": 0.0,
-      "description": "short explanation",
-      "reasoning": "detailed reasoning",
-      "recommendation": "how to fix",
-      "references": ["CWE-xxx"]
-    }
-  ]
-}
-END_FINDINGS_JSON
-
-Rules:
-- Produce 2-5 candidate CWEs.
-- If judge=yes, use exactly one CWE in final_answer.type and keep it consistent with vulnerabilities.
-- If judge=no, set type=N/A and vulnerabilities=[].
-- If a Contract Summary is present in context, treat it as high-priority evidence.
-- Prefer one primary vulnerability, but include up to two findings when distinct high-impact root causes coexist in the same function.
-- If context is insufficient, prefer judge=no and list missing_context_symbols.
-- Do not report speculative callee-only issues in wrapper/dispatcher functions; if issue depends on unseen callee internals, use missing_context_symbols and judge=no.
-- Optional telemetry fields are allowed: claim, precondition, where_precondition_is_enforced, trigger_path, exploitability, contract_breach_evidence, attacker_controlled_input, bounds_contradiction_evidence.
-- For fixed-size buffer + sprintf/strcpy sinks, include a memory corruption finding even when another issue (e.g., path traversal) is also present.
-- For unchecked integer multiplication on signed/width-limited ints, include CWE-190 when no bounds check is visible.
-- Output compact JSON only once. No markdown fences. No repeated payloads. No explanations.
-- Do not add prose outside BEGIN/END markers.
-""".strip()
-
-
 def _as_comment_block(text: str) -> str:
     lines = text.splitlines() or ["N/A"]
     return "\n".join("// " + line if line else "//" for line in lines)
@@ -190,7 +144,7 @@ def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
         f"file={chunk.file}, lines={chunk.start_line}-{chunk.end_line}, "
         f"function={chunk.function or 'N/A'}, mode={cfg.scan.mode}"
     )
-    system_prompt = SYSTEM_PROMPT_DUAL_STEP if cfg.scan.dual_step else SYSTEM_PROMPT_SINGLE_PASS
+    system_prompt = SYSTEM_PROMPT_SINGLE_PASS
     parts = [system_prompt, profile]
     if focus:
         parts.append(focus)

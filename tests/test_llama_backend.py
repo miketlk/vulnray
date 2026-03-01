@@ -6,7 +6,11 @@ from pathlib import Path
 
 from vulnllm.chunking.function_chunker import CodeChunk
 from vulnllm.config import Config
-from vulnllm.findings.model import extract_decision_metadata, parse_findings
+from vulnllm.findings.model import (
+    extract_complete_sane_formatted_output_block,
+    extract_decision_metadata,
+    parse_findings,
+)
 from vulnllm.inference.llama_backend import LlamaBackend
 from vulnllm.inference.parameters import GenerationParams
 
@@ -57,54 +61,20 @@ def test_llama_backend_returns_error_when_python_binding_unavailable(tmp_path: P
     assert result.error == "llama-cpp-python backend unavailable: import failed"
 
 
-def test_parse_findings_handles_prompt_echo_and_extra_json_text():
+def test_parse_findings_handles_prompt_echo_and_example_block():
     raw = """
-You are a code security reviewer. Return ONLY JSON:
-{
-  "vulnerabilities": [{"vulnerability_type":"example"}]
-}
+Output format (plain text, exactly these keys):
+#judge: yes|no
+#type: CWE-xx|N/A
+#confidence: low|medium|high
+#need_context: N/A|symbol_a,symbol_b
+#why: one short sentence
 
-```json
-{
-  "vulnerabilities": [
-    {
-      "vulnerability_type": "Integer Overflow",
-      "severity": "high",
-      "confidence": 0.8,
-      "description": "overflow",
-      "reasoning": "reason",
-      "recommendation": "fix",
-      "references": ["CWE-190"]
-    }
-  ]
-}
-```
-"""
-    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
-    findings, _ = parse_findings(raw, chunk)
-
-    assert len(findings) == 1
-    assert findings[0].vulnerability_type == "Integer Overflow"
-
-
-def test_parse_findings_prefers_best_structured_json_over_later_noise():
-    raw = """
-{"vulnerabilities":[{"vulnerability_type":"Integer Overflow","severity":"high","confidence":0.9,"description":"d","reasoning":"r","recommendation":"fix","references":["CWE-190"]}]}
-
-Human: let's keep going
-{"vulnerabilities":[{"vulnerability_type":"NoisyTail"}]}
-"""
-    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
-    findings, _ = parse_findings(raw, chunk)
-
-    assert len(findings) == 1
-    assert findings[0].vulnerability_type == "Integer Overflow"
-
-
-def test_parse_findings_keeps_first_schema_valid_object_only():
-    raw = """
-{"vulnerabilities":[{"vulnerability_type":"CWE-190","severity":"high","confidence":0.9,"description":"first","reasoning":"r","recommendation":"fix","references":["CWE-190"]}]}
-{"vulnerabilities":[{"vulnerability_type":"CWE-787","severity":"high","confidence":0.9,"description":"second","reasoning":"r","recommendation":"fix","references":["CWE-787"]}]}
+#judge: yes
+#type: CWE-190
+#confidence: high
+#need_context: N/A
+#why: overflow in multiplication path
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
@@ -113,12 +83,28 @@ def test_parse_findings_keeps_first_schema_valid_object_only():
     assert findings[0].vulnerability_type == "CWE-190"
 
 
-def test_parse_findings_accepts_final_answer_format_yes():
+def test_parse_findings_prefers_last_valid_compact_block():
     raw = """
-<reasoning>
-Potential out-of-bounds write through unchecked copy length.
-</reasoning>
-## Final Answer
+#judge: yes
+#type: CWE-120
+#confidence: high
+#need_context: N/A
+#why: intermediate answer
+
+#judge: no
+#type: N/A
+#confidence: low
+#need_context: helper_a
+#why: final answer says insufficient context
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert findings == []
+
+
+def test_parse_findings_accepts_compact_yes():
+    raw = """
 #judge: yes
 #type: CWE-787
 #confidence: high
@@ -135,9 +121,8 @@ Potential out-of-bounds write through unchecked copy length.
     assert findings[0].confidence == 0.9
 
 
-def test_parse_findings_accepts_final_answer_format_no():
+def test_parse_findings_accepts_compact_no():
     raw = """
-## Final Answer
 #judge: no
 #type: N/A
 #confidence: low
@@ -147,6 +132,18 @@ def test_parse_findings_accepts_final_answer_format_no():
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
 
+    assert findings == []
+
+
+def test_parse_findings_accepts_early_negative_without_why_when_no_context_requested():
+    raw = """
+#judge: no
+#type: N/A
+#confidence: high
+#need_context: N/A
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
     assert findings == []
 
 
@@ -163,97 +160,48 @@ def test_extract_decision_metadata_parses_compact_output():
     assert symbols == ["User", "create_user"]
 
 
-def test_parse_findings_prefers_last_compact_final_answer_block():
+def test_parse_findings_ignores_example_output_compact_block():
     raw = """
+Example output:
+#judge: yes|no
+#type: CWE-xx|N/A
+#confidence: low|medium|high
+#need_context: N/A|symbol_a,symbol_b
+#why: one short sentence
+
 #judge: yes
-#type: CWE-119
+#type: CWE-787
 #confidence: high
 #need_context: N/A
-#why: intermediate noisy answer
-
-#judge: no
-#type: N/A
-#confidence: low
-#need_context: helper_a
-#why: final answer says insufficient context
-"""
-    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
-    findings, _ = parse_findings(raw, chunk)
-    assert findings == []
-
-
-def test_parse_findings_parses_phase0_telemetry_fields():
-    raw = """
-{
-  "vulnerabilities": [
-    {
-      "vulnerability_type": "CWE-125",
-      "severity": "high",
-      "confidence": 0.91,
-      "description": "desc",
-      "reasoning": "reason",
-      "recommendation": "fix",
-      "references": ["CWE-125"],
-      "exploitability": "practical",
-      "contract_breach_evidence": "true",
-      "attacker_controlled_input": "true",
-      "bounds_contradiction_evidence": "true",
-      "analysis_mode": "contract-aware",
-      "evidence_spans": [{"line": 10}, {"line": 12}],
-      "requires_caller_violation": "true",
-      "context_sufficiency": "sufficient"
-    }
-  ]
-}
+#why: real finding
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
 
     assert len(findings) == 1
-    assert findings[0].analysis_mode == "contract-aware"
-    assert findings[0].evidence_spans == 2
-    assert findings[0].requires_caller_violation is True
-    assert findings[0].context_sufficiency == "sufficient"
-    assert findings[0].contract_breach_evidence is True
-    assert findings[0].attacker_controlled_input is True
-    assert findings[0].bounds_contradiction_evidence is True
+    assert findings[0].vulnerability_type == "CWE-787"
 
 
-def test_extract_decision_metadata_parses_candidate_cwes_and_missing_symbols():
+def test_extract_complete_sane_formatted_output_block_skips_example_output():
     raw = """
-{
-  "candidate_cwes": ["CWE-787", "CWE-476"],
-  "missing_context_symbols": ["ARG_CHECK", "VERIFY_CHECK"],
-  "vulnerabilities": []
-}
-"""
-    cwes, symbols = extract_decision_metadata(raw)
-    assert cwes == ["CWE-787", "CWE-476"]
-    assert symbols == ["ARG_CHECK", "VERIFY_CHECK"]
+Example output:
+#judge: yes|no
+#type: CWE-xx|N/A
+#confidence: low|medium|high
+#need_context: N/A|symbol_a,symbol_b
+#why: one short sentence
 
-
-def test_parse_findings_repairs_trailing_comma_json():
-    raw = """
-```json
-{
-  "vulnerabilities": [
-    {
-      "vulnerability_type": "CWE-125",
-      "severity": "high",
-      "confidence": 0.9,
-      "description": "desc",
-      "reasoning": "reason",
-      "recommendation": "fix",
-      "references": ["CWE-125"],
-    }
-  ],
-}
-```
+#judge: yes
+#type: CWE-190
+#confidence: high
+#need_context: N/A
+#why: real finding
+extra tail
 """
-    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
-    findings, _ = parse_findings(raw, chunk)
-    assert len(findings) == 1
-    assert findings[0].vulnerability_type == "CWE-125"
+    block = extract_complete_sane_formatted_output_block(raw)
+    assert block is not None
+    assert "#type: CWE-190" in block
+    assert "#type: CWE-xx|N/A" not in block
 
 
 def test_llama_backend_populates_usage_metrics(tmp_path: Path, monkeypatch):
@@ -423,3 +371,141 @@ def test_llama_backend_reuses_cached_expanded_context_between_exchanges(tmp_path
     assert first.context_size == 9083
     assert second.context_size == 9083
     assert created_contexts == [4096, 9083]
+
+
+def test_llama_backend_stops_early_after_complete_sane_formatted_block(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    yielded_tokens: list[str] = []
+    tail = "\nTRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED"
+    streamed_text = (
+        "#judge: yes\n"
+        "#type: CWE-787\n"
+        "#confidence: high\n"
+        "#need_context: N/A\n"
+        "#why: real finding\n"
+        + tail
+    )
+
+    class FakeLlama:
+        def __init__(self, **_kwargs):
+            pass
+
+        def create_completion(self, **kwargs):
+            if kwargs.get("stream"):
+                def _gen():
+                    for ch in streamed_text:
+                        yielded_tokens.append(ch)
+                        yield {"choices": [{"text": ch}]}
+
+                return _gen()
+            return {"choices": [{"text": streamed_text}], "usage": {}}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    backend = LlamaBackend(cfg)
+
+    result = backend.generate(
+        "Output format (plain text, exactly these keys):\n#judge: yes|no\n#type: CWE-xx|N/A",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=256),
+    )
+
+    assert result.error is None
+    assert result.text.endswith("#why: real finding")
+    assert "TRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED" not in result.text
+    assert len(yielded_tokens) < len(streamed_text)
+
+
+def test_llama_backend_stops_early_on_negative_without_context_request(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    yielded_tokens: list[str] = []
+    tail = "\nTRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED"
+    streamed_text = (
+        "#judge: no\n"
+        "#type: N/A\n"
+        "#confidence: high\n"
+        "#need_context: N/A\n"
+        + tail
+    )
+
+    class FakeLlama:
+        def __init__(self, **_kwargs):
+            pass
+
+        def create_completion(self, **kwargs):
+            if kwargs.get("stream"):
+                def _gen():
+                    for ch in streamed_text:
+                        yielded_tokens.append(ch)
+                        yield {"choices": [{"text": ch}]}
+
+                return _gen()
+            return {"choices": [{"text": streamed_text}], "usage": {}}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    backend = LlamaBackend(cfg)
+
+    result = backend.generate(
+        "Output format (plain text, exactly these keys):\n#judge: yes|no\n#type: CWE-xx|N/A",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=256),
+    )
+
+    assert result.error is None
+    assert result.text.endswith("#need_context: N/A")
+    assert "TRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED" not in result.text
+    assert len(yielded_tokens) < len(streamed_text)
+
+
+def test_llama_backend_does_not_use_early_negative_stop_when_preamble_exists(tmp_path: Path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+
+    yielded_tokens: list[str] = []
+    tail = "\nTRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED"
+    streamed_text = (
+        "thinking out loud\n"
+        "#judge: no\n"
+        "#type: N/A\n"
+        "#confidence: high\n"
+        "#need_context: N/A\n"
+        "#why: final decision\n"
+        + tail
+    )
+
+    class FakeLlama:
+        def __init__(self, **_kwargs):
+            pass
+
+        def create_completion(self, **kwargs):
+            if kwargs.get("stream"):
+                def _gen():
+                    for ch in streamed_text:
+                        yielded_tokens.append(ch)
+                        yield {"choices": [{"text": ch}]}
+
+                return _gen()
+            return {"choices": [{"text": streamed_text}], "usage": {}}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=FakeLlama))
+
+    cfg = Config(path=str(tmp_path))
+    cfg.inference.model = str(model)
+    backend = LlamaBackend(cfg)
+
+    result = backend.generate(
+        "Output format (plain text, exactly these keys):\n#judge: yes|no\n#type: CWE-xx|N/A",
+        GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=256),
+    )
+
+    assert result.error is None
+    assert result.text.endswith("#why: final decision")
+    assert "TRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED" not in result.text
+    assert len(yielded_tokens) < len(streamed_text)

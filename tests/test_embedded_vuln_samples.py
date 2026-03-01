@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from tests.model_utils import local_model_path, repo_root
@@ -50,69 +49,59 @@ def test_embedded_fixture_mocked_detection_pipeline():
     backend = LlamaBackend(cfg)
 
     def fake_generate(prompt: str, _params):
-        vulnerabilities = []
         if "unsafe_packet_copy" in prompt:
-            vulnerabilities.append(
-                {
-                    "vulnerability_type": "Improper Length Validation",
-                    "severity": "high",
-                    "confidence": 0.92,
-                    "description": "Length field copied into fixed-size stack buffer.",
-                    "reasoning": "copy_len from packet controls memcpy length into local[64].",
-                    "recommendation": "Validate copy_len <= sizeof(local)",
-                    "references": ["CWE-120", "CWE-130"],
-                }
+            return InferenceResult(
+                text=(
+                    "#judge: yes\n"
+                    "#type: Improper Length Validation\n"
+                    "#confidence: high\n"
+                    "#need_context: N/A\n"
+                    "#why: Length field copied into fixed-size stack buffer."
+                )
             )
         if "insecure_session_cleanup" in prompt:
-            vulnerabilities.append(
-                {
-                    "vulnerability_type": "Double Free",
-                    "severity": "high",
-                    "confidence": 0.89,
-                    "description": "session token may be freed twice.",
-                    "reasoning": "free is invoked twice on token through distinct branches.",
-                    "recommendation": "Guard with single free and null assignment.",
-                    "references": ["CWE-415"],
-                }
+            return InferenceResult(
+                text=(
+                    "#judge: yes\n"
+                    "#type: Double Free\n"
+                    "#confidence: high\n"
+                    "#need_context: N/A\n"
+                    "#why: session token may be freed twice."
+                )
             )
         if "use_after_free_path" in prompt:
-            vulnerabilities.append(
-                {
-                    "vulnerability_type": "Use After Free",
-                    "severity": "critical",
-                    "confidence": 0.91,
-                    "description": "Freed buffer is accessed.",
-                    "reasoning": "tmp is freed and then dereferenced via tmp[0].",
-                    "recommendation": "Do not dereference freed pointers.",
-                    "references": ["CWE-416"],
-                }
+            return InferenceResult(
+                text=(
+                    "#judge: yes\n"
+                    "#type: Use After Free\n"
+                    "#confidence: high\n"
+                    "#need_context: N/A\n"
+                    "#why: Freed buffer is accessed."
+                )
             )
         if "configure_dma_transfer" in prompt:
-            vulnerabilities.append(
-                {
-                    "vulnerability_type": "Integer Overflow",
-                    "severity": "high",
-                    "confidence": 0.86,
-                    "description": "Multiplication may overflow 16-bit accumulator.",
-                    "reasoning": "desc->length * chunks stored in uint16_t total.",
-                    "recommendation": "Use wider type and bounds check before multiply.",
-                    "references": ["CWE-190"],
-                }
+            return InferenceResult(
+                text=(
+                    "#judge: yes\n"
+                    "#type: Integer Overflow\n"
+                    "#confidence: high\n"
+                    "#need_context: N/A\n"
+                    "#why: Multiplication may overflow 16-bit accumulator."
+                )
             )
         if "secret_key_copy" in prompt:
-            vulnerabilities.append(
-                {
-                    "vulnerability_type": "Key Material Exposure",
-                    "severity": "medium",
-                    "confidence": 0.78,
-                    "description": "Secret key is copied into debug log buffer.",
-                    "reasoning": "key bytes are copied to debug_log without redaction.",
-                    "recommendation": "Avoid logging raw key material.",
-                    "references": ["CWE-200"],
-                }
+            return InferenceResult(
+                text=(
+                    "#judge: yes\n"
+                    "#type: Key Material Exposure\n"
+                    "#confidence: medium\n"
+                    "#need_context: N/A\n"
+                    "#why: Secret key is copied into debug log buffer."
+                )
             )
-
-        return InferenceResult(text=json.dumps({"vulnerabilities": vulnerabilities}))
+        return InferenceResult(
+            text="#judge: no\n#type: N/A\n#confidence: high\n#need_context: N/A\n#why: no vulnerability found"
+        )
 
     backend.generate = fake_generate  # type: ignore[assignment]
 
