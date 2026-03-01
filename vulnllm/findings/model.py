@@ -22,6 +22,12 @@ class Finding:
     reasoning: str
     references: list[str] = field(default_factory=list)
     recommendation: str = ""
+    claim: str = ""
+    precondition: str = ""
+    where_precondition_is_enforced: str = "none"
+    trigger_path: str = ""
+    exploitability: str = "theoretical"
+    contract_breach_evidence: bool = False
     analysis_mode: str = "shallow"
     evidence_spans: int = 0
     requires_caller_violation: bool = False
@@ -67,6 +73,13 @@ def _normalize_context_sufficiency(value: object) -> str:
     if normalized in {"sufficient", "insufficient", "unknown"}:
         return normalized
     return "unknown"
+
+
+def _normalize_exploitability(value: object) -> str:
+    normalized = str(value or "theoretical").strip().lower()
+    if normalized in {"practical", "theoretical", "contract-break-only"}:
+        return normalized
+    return "theoretical"
 
 
 def _extract_json(raw: str) -> dict:
@@ -136,7 +149,33 @@ def _extract_json(raw: str) -> dict:
         return best_scored[1]
     if best_any is not None:
         return best_any
+    repaired = _repair_json_payload(raw)
+    if repaired is not None:
+        return repaired
     raise ValueError("No JSON object found")
+
+
+def _repair_json_payload(raw: str) -> dict | None:
+    text = raw.strip()
+    if not text:
+        return None
+
+    if "```" in text:
+        text = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).replace("```", "").strip()
+    if not text:
+        return None
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = text[start : end + 1]
+    # Conservative local repair for common tailing-comma JSON issues.
+    candidate = re.sub(r",(\s*[}\]])", r"\1", candidate)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
 
 
 def _extract_final_answer_format(raw: str) -> dict | None:
@@ -166,6 +205,18 @@ def _extract_final_answer_format(raw: str) -> dict | None:
             }
         ]
     }
+
+
+def extract_decision_metadata(raw: str) -> tuple[list[str], list[str]]:
+    try:
+        obj = _extract_json(raw)
+    except Exception:
+        return [], []
+    candidate_cwes = obj.get("candidate_cwes", [])
+    missing_context_symbols = obj.get("missing_context_symbols", [])
+    cwes = [str(x).strip().upper() for x in candidate_cwes if str(x).strip()]
+    symbols = [str(x).strip() for x in missing_context_symbols if str(x).strip()]
+    return cwes, symbols
 
 
 def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[Finding], int]:
@@ -198,6 +249,12 @@ def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[
                 reasoning=str(v.get("reasoning", "")),
                 references=[str(x) for x in v.get("references", []) if x],
                 recommendation=str(v.get("recommendation", "")),
+                claim=str(v.get("claim", "")),
+                precondition=str(v.get("precondition", "")),
+                where_precondition_is_enforced=str(v.get("where_precondition_is_enforced", "none") or "none"),
+                trigger_path=str(v.get("trigger_path", "")),
+                exploitability=_normalize_exploitability(v.get("exploitability", "theoretical")),
+                contract_breach_evidence=_parse_bool(v.get("contract_breach_evidence"), default=False),
                 analysis_mode=_normalize_analysis_mode(v.get("analysis_mode", "shallow")),
                 evidence_spans=_parse_evidence_spans_count(v.get("evidence_spans")),
                 requires_caller_violation=_parse_bool(v.get("requires_caller_violation"), default=False),

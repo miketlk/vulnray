@@ -23,6 +23,7 @@ class ScanConfig:
     mode: str = "balanced"
     languages: list[str] = field(default_factory=lambda: ["c"])
     multi_pass: bool = False
+    dual_step: bool = False
     max_findings: int = 0
     function: str | None = None
 
@@ -159,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project-index", choices=["off", "basic"])
 
     p.add_argument("--multi-pass", action="store_true")
+    p.add_argument("--dual-step", action="store_true")
     p.add_argument("--pass1-budget", choices=["fast", "normal"])
     p.add_argument("--pass2-target", choices=["flagged", "topk"])
     p.add_argument("--pass2-topk", type=int)
@@ -312,6 +314,8 @@ def _apply_cli_overrides(data: dict[str, Any], args: argparse.Namespace) -> dict
         sec("files")["follow_symlinks"] = True
     if args.multi_pass:
         sec("scan")["multi_pass"] = True
+    if args.dual_step:
+        sec("scan")["dual_step"] = True
     if args.llm_inference_test is True:
         cli["llm_inference_test"] = True
     if args.metal:

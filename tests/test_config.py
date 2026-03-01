@@ -76,6 +76,13 @@ def test_config_function_filter_from_cli():
     assert cfg.scan.function == "secp256k1_fe_mul_inner"
 
 
+def test_config_dual_step_from_cli():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--dual-step"])
+    cfg = resolve_config(args)
+    assert cfg.scan.dual_step is True
+
+
 def test_config_prompt_output_logging_defaults_off_and_cli_enables():
     parser = build_parser()
     args_default = parser.parse_args([".", "--model", "./model.gguf"])

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from vulnllm.chunking.function_chunker import CodeChunk
 from vulnllm.config import Config
-from vulnllm.findings.model import parse_findings
+from vulnllm.findings.model import extract_decision_metadata, parse_findings
 from vulnllm.inference.llama_backend import LlamaBackend
 from vulnllm.inference.parameters import GenerationParams
 
@@ -158,6 +158,43 @@ def test_parse_findings_parses_phase0_telemetry_fields():
     assert findings[0].evidence_spans == 2
     assert findings[0].requires_caller_violation is True
     assert findings[0].context_sufficiency == "sufficient"
+
+
+def test_extract_decision_metadata_parses_candidate_cwes_and_missing_symbols():
+    raw = """
+{
+  "candidate_cwes": ["CWE-787", "CWE-476"],
+  "missing_context_symbols": ["ARG_CHECK", "VERIFY_CHECK"],
+  "vulnerabilities": []
+}
+"""
+    cwes, symbols = extract_decision_metadata(raw)
+    assert cwes == ["CWE-787", "CWE-476"]
+    assert symbols == ["ARG_CHECK", "VERIFY_CHECK"]
+
+
+def test_parse_findings_repairs_trailing_comma_json():
+    raw = """
+```json
+{
+  "vulnerabilities": [
+    {
+      "vulnerability_type": "CWE-125",
+      "severity": "high",
+      "confidence": 0.9,
+      "description": "desc",
+      "reasoning": "reason",
+      "recommendation": "fix",
+      "references": ["CWE-125"],
+    }
+  ],
+}
+```
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+    assert len(findings) == 1
+    assert findings[0].vulnerability_type == "CWE-125"
 
 
 def test_llama_backend_populates_usage_metrics(tmp_path: Path, monkeypatch):

@@ -517,7 +517,7 @@ def test_function_filter_scans_only_selected_function(monkeypatch, tmp_path: Pat
     assert "int foo(int x)" not in prompts[0]
 
 
-def test_scan_retries_unparsable_output_with_different_seed_then_succeeds(monkeypatch, tmp_path: Path, caplog):
+def test_scan_marks_chunk_unresolved_on_unparsable_output_without_retry(monkeypatch, tmp_path: Path, caplog):
     src = tmp_path / "main.c"
     src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
     model = tmp_path / "model.gguf"
@@ -533,9 +533,7 @@ def test_scan_retries_unparsable_output_with_different_seed_then_succeeds(monkey
         def generate(self, _prompt, params):
             calls["n"] += 1
             seen_seeds.append(params.seed)
-            if calls["n"] == 1:
-                return InferenceResult(text="not-json", error=None)
-            return InferenceResult(text=json.dumps({"vulnerabilities": []}), error=None)
+            return InferenceResult(text="not-json", error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -550,8 +548,6 @@ def test_scan_retries_unparsable_output_with_different_seed_then_succeeds(monkey
             str(model),
             "--seed",
             "7",
-            "--retries",
-            "3",
             "--out-dir",
             str(out_dir),
             "--overwrite",
@@ -562,13 +558,13 @@ def test_scan_retries_unparsable_output_with_different_seed_then_succeeds(monkey
     rc = run()
 
     assert rc == 0
-    assert calls["n"] == 2
-    assert seen_seeds[:2] == [7, 8]
-    assert "Unparsable model output; retrying" in caplog.text
-    assert "Skipping function due to unparsable model output" not in caplog.text
+    assert calls["n"] == 1
+    assert seen_seeds == [7]
+    assert "Unparsable model output; retrying" not in caplog.text
+    assert "Marking chunk unresolved due to unparsable model output" in caplog.text
 
 
-def test_scan_skips_chunk_after_unparsable_retries_exhausted(monkeypatch, tmp_path: Path, caplog):
+def test_scan_repairs_unparsable_json_output_locally(monkeypatch, tmp_path: Path, caplog):
     src = tmp_path / "main.c"
     src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
     model = tmp_path / "model.gguf"
@@ -582,7 +578,10 @@ def test_scan_skips_chunk_after_unparsable_retries_exhausted(monkeypatch, tmp_pa
 
         def generate(self, _prompt, params):
             seen_seeds.append(params.seed)
-            return InferenceResult(text="still not-json", error=None)
+            return InferenceResult(
+                text='```json\n{"vulnerabilities":[{"vulnerability_type":"CWE-190","severity":"high","confidence":0.8,"description":"d","reasoning":"r","recommendation":"fix","references":["CWE-190"],}],}\n```',
+                error=None,
+            )
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -597,8 +596,6 @@ def test_scan_skips_chunk_after_unparsable_retries_exhausted(monkeypatch, tmp_pa
             str(model),
             "--seed",
             "11",
-            "--retries",
-            "2",
             "--out-dir",
             str(out_dir),
             "--overwrite",
@@ -608,6 +605,6 @@ def test_scan_skips_chunk_after_unparsable_retries_exhausted(monkeypatch, tmp_pa
     caplog.set_level(logging.WARNING, logger="vulnllm")
     rc = run()
 
-    assert rc == 0
-    assert seen_seeds == [11, 12, 13]
-    assert "Skipping function due to unparsable model output after 3 attempts" in caplog.text
+    assert rc == 1
+    assert seen_seeds == [11]
+    assert "Marking chunk unresolved due to unparsable model output" not in caplog.text

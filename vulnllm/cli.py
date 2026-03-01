@@ -12,7 +12,7 @@ from vulnllm.chunking.sliding_chunker import chunk_file_sliding
 from vulnllm.config import build_parser, resolve_config
 from vulnllm.export_code import export_codebase_container
 from vulnllm.findings.deduplicator import deduplicate_findings
-from vulnllm.findings.model import Finding, parse_findings
+from vulnllm.findings.model import Finding, extract_decision_metadata, parse_findings
 from vulnllm.inference.llama_backend import LlamaBackend
 from vulnllm.inference.multipass import run_scan_multipass
 from vulnllm.inference.parameters import mode_params
@@ -139,6 +139,76 @@ def _index_context(index: ProjectIndex | None, chunk: CodeChunk) -> str:
     if not refs:
         return ""
     return "Known symbol locations:\n" + "\n".join(f"- {f}:{line}" for f, line in refs[:5])
+
+
+def _requested_symbol_context(index: ProjectIndex | None, symbols: list[str]) -> str:
+    if index is None or not symbols:
+        return ""
+    lines: list[str] = []
+    for symbol in symbols[:8]:
+        refs = index.query_symbol(symbol)
+        if not refs:
+            continue
+        lines.append(f"- {symbol}:")
+        for file_name, line in refs[:5]:
+            lines.append(f"  - {file_name}:{line}")
+    if not lines:
+        return ""
+    return "Requested symbol locations:\n" + "\n".join(lines)
+
+
+def _build_dual_step_verifier_prompt(
+    cfg,
+    chunk: CodeChunk,
+    *,
+    base_context: str,
+    requested_context: str,
+    exchange1_output: str,
+    candidate_cwes: list[str],
+) -> str:
+    policy = candidate_cwes[:5] or ["N/A"]
+    policy_text = ", ".join(policy)
+    verifier_focus = (
+        "Verifier pass constraints:\n"
+        f"- Candidate CWE policy (no expansion): {policy_text}\n"
+        "- Confirm, downgrade, or reject exchange-1 findings only.\n"
+        "- Keep final_answer.type within candidate policy or N/A.\n"
+        "- Do not add new CWE classes.\n"
+        "- Output ONLY final reportable findings JSON.\n"
+    )
+    merged_context = base_context.strip()
+    if requested_context.strip():
+        merged_context = "\n\n".join([merged_context, requested_context.strip()]).strip()
+    prompt = build_prompt(cfg, chunk, index_context=merged_context)
+    return (
+        f"{prompt}\n\n{verifier_focus}\n"
+        f"Exchange-1 model output to verify:\n```json\n{exchange1_output}\n```\n"
+    )
+
+
+def _filter_contract_break_only(findings: list[Finding]) -> list[Finding]:
+    filtered: list[Finding] = []
+    for finding in findings:
+        if finding.exploitability == "contract-break-only" and not finding.contract_breach_evidence:
+            continue
+        filtered.append(finding)
+    return filtered
+
+
+def _filter_by_candidate_policy(findings: list[Finding], candidate_cwes: list[str]) -> list[Finding]:
+    policy = {cwe.upper() for cwe in candidate_cwes if cwe}
+    if not policy:
+        return findings
+    out: list[Finding] = []
+    for finding in findings:
+        vuln_type = (finding.vulnerability_type or "").upper()
+        if vuln_type in policy:
+            out.append(finding)
+            continue
+        refs = {ref.upper() for ref in finding.references}
+        if refs & policy:
+            out.append(finding)
+    return out
 
 
 def _collect_outputs(cfg) -> dict[str, Path]:
@@ -351,83 +421,56 @@ def run() -> int:
                 else:
                     pass1_progress += 1
                     maybe_progress(progress_enabled, pass1_progress, total_chunks, f"{chunk.file} (pass1)")
-                prompt = build_prompt(cfg, chunk, index_context=_index_context(index, chunk))
+                base_index_context = _index_context(index, chunk)
+                prompt = build_prompt(cfg, chunk, index_context=base_index_context)
                 if prompt_output_path is not None:
                     prompt_output_entry += 1
                     if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
                         _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
                 base_params = mode_params(cfg, deep=deep)
-                max_attempts = max(1, int(cfg.inference.retries) + 1)
+                used_seed: int | None = base_params.seed
                 result = None
                 parsed_findings: list[Finding] | None = None
                 next_id2: int | None = None
-                last_parse_error: str | None = None
-                used_seed: int | None = None
 
-                for attempt in range(max_attempts):
-                    params = replace(base_params, seed=base_params.seed + attempt)
-                    used_seed = params.seed
-                    t0 = time.perf_counter()
-                    try:
-                        result = backend.generate(prompt, params)
-                    except Exception as e:  # noqa: BLE001
-                        elapsed = max(0.0, time.perf_counter() - t0)
-                        total_exchange_time_sec += elapsed
-                        exchange_count += 1
-                        msg = (
-                            "Skipping function due to exchange exception "
-                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                            f"function={chunk.function or 'N/A'}): {e}"
-                        )
-                        log.exception(msg)
-                        print(msg, file=sys.stderr)
-                        failed_chunks += 1
-                        return []
-
+                t0 = time.perf_counter()
+                try:
+                    result = backend.generate(prompt, base_params)
+                except Exception as e:  # noqa: BLE001
                     elapsed = max(0.0, time.perf_counter() - t0)
                     total_exchange_time_sec += elapsed
                     exchange_count += 1
+                    msg = (
+                        "Skipping function due to exchange exception "
+                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                        f"function={chunk.function or 'N/A'}): {e}"
+                    )
+                    log.exception(msg)
+                    print(msg, file=sys.stderr)
+                    failed_chunks += 1
+                    return []
 
-                    if not result.error:
-                        prompt_tokens = (
-                            result.prompt_tokens
-                            if result.prompt_tokens is not None
-                            else _approx_tokens(prompt)
-                        )
-                        completion_tokens = (
-                            result.completion_tokens
-                            if result.completion_tokens is not None
-                            else _approx_tokens(result.text, allow_zero=True)
-                        )
-                        total_tokens = (
-                            result.total_tokens
-                            if result.total_tokens is not None
-                            else prompt_tokens + completion_tokens
-                        )
-                        total_exchange_tokens += max(0, int(total_tokens))
+                elapsed = max(0.0, time.perf_counter() - t0)
+                total_exchange_time_sec += elapsed
+                exchange_count += 1
 
-                    if result.error:
-                        break
-                    current_findings, parsed_next_id = parse_findings(result.text, chunk, start_id=next_id)
-                    parse_errors = [f for f in current_findings if f.vulnerability_type == "ParserError"]
-                    if not parse_errors:
-                        parsed_findings = current_findings
-                        next_id2 = parsed_next_id
-                        break
-                    last_parse_error = parse_errors[0].parse_error or "unknown parse error"
-                    if attempt + 1 < max_attempts:
-                        log.warning(
-                            "Unparsable model output; retrying (%s attempt %s/%s, %s:%s-%s, function=%s, seed=%s): %s",
-                            pass_name,
-                            attempt + 1,
-                            max_attempts,
-                            chunk.file,
-                            chunk.start_line,
-                            chunk.end_line,
-                            chunk.function or "N/A",
-                            params.seed,
-                            last_parse_error,
-                        )
+                if not result.error:
+                    prompt_tokens = (
+                        result.prompt_tokens
+                        if result.prompt_tokens is not None
+                        else _approx_tokens(prompt)
+                    )
+                    completion_tokens = (
+                        result.completion_tokens
+                        if result.completion_tokens is not None
+                        else _approx_tokens(result.text, allow_zero=True)
+                    )
+                    total_tokens = (
+                        result.total_tokens
+                        if result.total_tokens is not None
+                        else prompt_tokens + completion_tokens
+                    )
+                    total_exchange_tokens += max(0, int(total_tokens))
                 if prompt_output_path is not None:
                     if cfg.logging.log_model_outputs or cfg.logging.log_prompts:
                         _append_inference_metadata_section(
@@ -466,11 +509,124 @@ def run() -> int:
                     print(msg, file=sys.stderr)
                     failed_chunks += 1
                     return []
+                parsed_findings, next_id2 = parse_findings(result.text, chunk, start_id=next_id)
+                parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
+                if parse_errors:
+                    parse_error = parse_errors[0].parse_error or "unknown parse error"
+                    msg = (
+                        "Marking chunk unresolved due to unparsable model output "
+                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                        f"function={chunk.function or 'N/A'}): {parse_error}"
+                    )
+                    log.warning(msg)
+                    print(msg, file=sys.stderr)
+                    failed_chunks += 1
+                    return []
+
+                parsed_findings = _filter_contract_break_only(parsed_findings)
+
+                if cfg.scan.dual_step:
+                    candidate_cwes, missing_symbols = extract_decision_metadata(result.text)
+                    verifier_context = _requested_symbol_context(index, missing_symbols)
+                    verifier_prompt = _build_dual_step_verifier_prompt(
+                        cfg,
+                        chunk,
+                        base_context=base_index_context,
+                        requested_context=verifier_context,
+                        exchange1_output=result.text,
+                        candidate_cwes=candidate_cwes,
+                    )
+                    verifier_params = replace(base_params, temperature=0.0, seed=base_params.seed)
+                    used_seed = verifier_params.seed
+                    t1 = time.perf_counter()
+                    try:
+                        verifier_result = backend.generate(verifier_prompt, verifier_params)
+                    except Exception as e:  # noqa: BLE001
+                        elapsed2 = max(0.0, time.perf_counter() - t1)
+                        total_exchange_time_sec += elapsed2
+                        exchange_count += 1
+                        msg = (
+                            "Skipping function due to verifier exception "
+                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                            f"function={chunk.function or 'N/A'}): {e}"
+                        )
+                        log.exception(msg)
+                        print(msg, file=sys.stderr)
+                        failed_chunks += 1
+                        return []
+                    elapsed2 = max(0.0, time.perf_counter() - t1)
+                    total_exchange_time_sec += elapsed2
+                    exchange_count += 1
+                    if prompt_output_path is not None:
+                        prompt_output_entry += 1
+                        if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
+                            _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+                            _append_inference_metadata_section(
+                                prompt_output_path,
+                                timestamp_local=verifier_result.timestamp_local,
+                                context_size=(verifier_result.context_size or cfg.inference.context),
+                                context_events=verifier_result.context_events,
+                                seed=used_seed,
+                            )
+                        if cfg.logging.log_prompts:
+                            _append_prompt_section(prompt_output_path, verifier_prompt)
+                        if cfg.logging.log_model_outputs:
+                            _append_output_section(
+                                prompt_output_path,
+                                verifier_result.text,
+                                verifier_result.error,
+                            )
+
+                    if not verifier_result.error:
+                        prompt_tokens2 = (
+                            verifier_result.prompt_tokens
+                            if verifier_result.prompt_tokens is not None
+                            else _approx_tokens(verifier_prompt)
+                        )
+                        completion_tokens2 = (
+                            verifier_result.completion_tokens
+                            if verifier_result.completion_tokens is not None
+                            else _approx_tokens(verifier_result.text, allow_zero=True)
+                        )
+                        total_tokens2 = (
+                            verifier_result.total_tokens
+                            if verifier_result.total_tokens is not None
+                            else prompt_tokens2 + completion_tokens2
+                        )
+                        total_exchange_tokens += max(0, int(total_tokens2))
+
+                    if verifier_result.error:
+                        msg = (
+                            "Skipping function due to verifier inference error "
+                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                            f"function={chunk.function or 'N/A'}): {verifier_result.error}"
+                        )
+                        log.warning(msg)
+                        print(msg, file=sys.stderr)
+                        failed_chunks += 1
+                        return []
+
+                    parsed_findings, next_id2 = parse_findings(verifier_result.text, chunk, start_id=next_id)
+                    parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
+                    if parse_errors:
+                        parse_error = parse_errors[0].parse_error or "unknown parse error"
+                        msg = (
+                            "Marking chunk unresolved due to unparsable verifier output "
+                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                            f"function={chunk.function or 'N/A'}): {parse_error}"
+                        )
+                        log.warning(msg)
+                        print(msg, file=sys.stderr)
+                        failed_chunks += 1
+                        return []
+                    parsed_findings = _filter_contract_break_only(parsed_findings)
+                    parsed_findings = _filter_by_candidate_policy(parsed_findings, candidate_cwes)
+
                 if parsed_findings is None or next_id2 is None:
                     msg = (
-                        "Skipping function due to unparsable model output after "
-                        f"{max_attempts} attempts ({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                        f"function={chunk.function or 'N/A'}): {last_parse_error or 'unknown parse error'}"
+                        "Marking chunk unresolved due to missing parsed findings "
+                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                        f"function={chunk.function or 'N/A'})"
                     )
                     log.warning(msg)
                     print(msg, file=sys.stderr)

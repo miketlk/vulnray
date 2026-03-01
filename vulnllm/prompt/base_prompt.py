@@ -19,10 +19,12 @@ and privilege-sensitive behavior before deciding.
 
 Return ONLY JSON using this shape:
 {
+  "candidate_cwes": ["CWE-xx", "CWE-yy"],
   "final_answer": {
     "judge": "yes|no",
     "type": "CWE-xx|N/A"
   },
+  "missing_context_symbols": ["symbol_name"],
   "vulnerabilities": [
     {
       "vulnerability_type": "CWE-xx",
@@ -30,6 +32,11 @@ Return ONLY JSON using this shape:
       "confidence": 0.0,
       "description": "short explanation",
       "reasoning": "detailed reasoning",
+      "claim": "concrete security claim",
+      "precondition": "required condition for bug to trigger",
+      "where_precondition_is_enforced": "line refs or none",
+      "trigger_path": "caller-to-sink path or local path",
+      "exploitability": "practical|theoretical|contract-break-only",
       "recommendation": "how to fix",
       "references": ["CWE-xxx"]
     }
@@ -37,8 +44,12 @@ Return ONLY JSON using this shape:
 }
 
 Constraints:
+- Produce 2-5 candidate CWEs in candidate_cwes.
 - If judge is "yes", use exactly one most probable CWE in final_answer.type.
 - If judge is "no", final_answer.type must be "N/A" and vulnerabilities must be [].
+- Do not report CWE-476/CWE-125/CWE-787/CWE-121/CWE-190 unless you can show:
+  attacker control, missing caller-chain contract enforcement, or contradiction with nearby assertions/macros.
+- If exploitability is contract-break-only, include evidence of contract breach; otherwise set judge=no.
 - Do not wrap JSON in markdown.
 """.strip()
 
