@@ -121,6 +121,9 @@ Potential out-of-bounds write through unchecked copy length.
 ## Final Answer
 #judge: yes
 #type: CWE-787
+#confidence: high
+#need_context: N/A
+#why: unchecked copy may overflow destination
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
@@ -128,6 +131,8 @@ Potential out-of-bounds write through unchecked copy length.
     assert len(findings) == 1
     assert findings[0].vulnerability_type == "CWE-787"
     assert "CWE-787" in findings[0].references
+    assert findings[0].description == "unchecked copy may overflow destination"
+    assert findings[0].confidence == 0.9
 
 
 def test_parse_findings_accepts_final_answer_format_no():
@@ -135,10 +140,45 @@ def test_parse_findings_accepts_final_answer_format_no():
 ## Final Answer
 #judge: no
 #type: N/A
+#confidence: low
+#need_context: helper_a, helper_b
+#why: missing caller validation context
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
 
+    assert findings == []
+
+
+def test_extract_decision_metadata_parses_compact_output():
+    raw = """
+#judge: yes
+#type: CWE-120
+#confidence: high
+#need_context: User, create_user
+#why: unchecked copy into fixed buffer
+"""
+    cwes, symbols = extract_decision_metadata(raw)
+    assert cwes == ["CWE-120"]
+    assert symbols == ["User", "create_user"]
+
+
+def test_parse_findings_prefers_last_compact_final_answer_block():
+    raw = """
+#judge: yes
+#type: CWE-119
+#confidence: high
+#need_context: N/A
+#why: intermediate noisy answer
+
+#judge: no
+#type: N/A
+#confidence: low
+#need_context: helper_a
+#why: final answer says insufficient context
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
     assert findings == []
 
 

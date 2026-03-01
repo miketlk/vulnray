@@ -551,6 +551,8 @@ def test_scan_marks_chunk_unresolved_on_unparsable_output_without_retry(monkeypa
             str(model),
             "--seed",
             "7",
+            "--retries",
+            "0",
             "--out-dir",
             str(out_dir),
             "--overwrite",
@@ -565,6 +567,73 @@ def test_scan_marks_chunk_unresolved_on_unparsable_output_without_retry(monkeypa
     assert seen_seeds == [7]
     assert "Unparsable model output; retrying" not in caplog.text
     assert "Marking chunk unresolved due to unparsable model output" in caplog.text
+
+
+def test_scan_retries_unparsable_output_with_different_seed(monkeypatch, tmp_path: Path, caplog):
+    src = tmp_path / "main.c"
+    src.write_text("int mul(int a, int b) { return a * b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+    seen_seeds: list[int] = []
+    calls = {"n": 0}
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, params):
+            calls["n"] += 1
+            seen_seeds.append(params.seed)
+            if calls["n"] == 1:
+                return InferenceResult(text="not-json", error=None)
+            return InferenceResult(
+                text=json.dumps(
+                    {
+                        "vulnerabilities": [
+                            {
+                                "vulnerability_type": "CWE-190",
+                                "severity": "medium",
+                                "confidence": 0.7,
+                                "description": "d",
+                                "reasoning": "r",
+                                "recommendation": "fix",
+                                "references": ["CWE-190"],
+                            }
+                        ]
+                    }
+                ),
+                error=None,
+            )
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--seed",
+            "7",
+            "--retries",
+            "2",
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    caplog.set_level(logging.WARNING, logger="vulnllm")
+    rc = run()
+
+    assert rc == 1
+    assert seen_seeds == [7, 8]
+    assert "Unparsable model output; retrying with different seed" in caplog.text
+    assert "Marking chunk unresolved due to unparsable model output" not in caplog.text
 
 
 def test_scan_uses_heuristic_fallback_for_unparsable_unsafe_sink(monkeypatch, tmp_path: Path):
@@ -668,7 +737,12 @@ def test_scan_repairs_unparsable_json_output_locally(monkeypatch, tmp_path: Path
 
 def test_scan_accepts_findings_without_evidence_spans_after_gate_relaxation(monkeypatch, tmp_path: Path):
     src = tmp_path / "main.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    src.write_text(
+        "void copy_name(char *dst, const char *src) {\n"
+        "    strcpy(dst, src);\n"
+        "}\n",
+        encoding="utf-8",
+    )
     model = tmp_path / "model.gguf"
     model.write_bytes(b"GGUF")
     out_dir = tmp_path / "reports"
@@ -720,6 +794,61 @@ def test_scan_accepts_findings_without_evidence_spans_after_gate_relaxation(monk
 
     rc = run()
     assert rc == 1
+
+
+def test_scan_drops_memory_cwe_without_local_memory_evidence(monkeypatch, tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(
+                text=json.dumps(
+                    {
+                        "vulnerabilities": [
+                            {
+                                "vulnerability_type": "CWE-120",
+                                "severity": "high",
+                                "confidence": 0.8,
+                                "description": "d",
+                                "reasoning": "r",
+                                "recommendation": "fix",
+                                "references": ["CWE-120"],
+                                "exploitability": "practical",
+                                "attacker_controlled_input": True,
+                                "evidence_spans": 0,
+                            }
+                        ]
+                    }
+                ),
+                error=None,
+            )
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    rc = run()
+    assert rc == 0
 
 
 def test_scan_accepts_calibrated_cwe_without_bounds_contradiction_after_gate_relaxation(monkeypatch, tmp_path: Path):

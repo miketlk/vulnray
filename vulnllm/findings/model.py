@@ -185,27 +185,45 @@ def _is_schema_valid_json_object(obj: dict) -> bool:
 
 
 def _extract_final_answer_format(raw: str) -> dict | None:
-    judge_match = re.search(r"(?im)^\s*#judge:\s*(yes|no)\s*$", raw)
-    type_match = re.search(r"(?im)^\s*#type:\s*([^\n\r]+)\s*$", raw)
-    if judge_match is None or type_match is None:
+    judge_matches = list(re.finditer(r"(?im)^\s*#judge:\s*(yes|no)\s*$", raw))
+    type_matches = list(re.finditer(r"(?im)^\s*#type:\s*([^\n\r]+)\s*$", raw))
+    if not judge_matches or not type_matches:
         return None
+
+    # Use the last emitted pair to reduce damage from repeated/noisy intermediate blocks.
+    judge_match = judge_matches[-1]
+    type_match = next((m for m in reversed(type_matches) if m.start() >= judge_match.start()), type_matches[-1])
+
+    tail = raw[judge_match.start() :]
+    conf_match = re.search(r"(?im)^\s*#confidence:\s*(low|medium|high)\s*$", tail)
+    why_match = re.search(r"(?im)^\s*#why:\s*([^\n\r]+)\s*$", tail)
+    ctx_match = re.search(r"(?im)^\s*#need_context:\s*([^\n\r]+)\s*$", tail)
 
     judge = judge_match.group(1).strip().lower()
     vuln_type = type_match.group(1).strip()
+    confidence_label = conf_match.group(1).strip().lower() if conf_match else "medium"
+    confidence = {"low": 0.5, "medium": 0.7, "high": 0.9}.get(confidence_label, 0.7)
+    why = why_match.group(1).strip() if why_match else "Parsed from compact #judge/#type output."
+    need_context = ctx_match.group(1).strip() if ctx_match else "N/A"
+    missing_symbols = []
+    if need_context and need_context.upper() != "N/A":
+        missing_symbols = [x.strip() for x in need_context.split(",") if x.strip()]
     if judge == "no":
-        return {"vulnerabilities": []}
+        return {"missing_context_symbols": missing_symbols, "vulnerabilities": []}
 
     if vuln_type.upper() == "N/A":
         vuln_type = "Potential Vulnerability"
     cwe = vuln_type.upper() if vuln_type.upper().startswith("CWE-") else ""
     return {
+        "candidate_cwes": [cwe] if cwe else [],
+        "missing_context_symbols": missing_symbols,
         "vulnerabilities": [
             {
                 "vulnerability_type": vuln_type,
                 "severity": "medium",
-                "confidence": 0.6,
-                "description": "Parsed from #judge/#type output.",
-                "reasoning": raw[:1200],
+                "confidence": confidence,
+                "description": why,
+                "reasoning": why,
                 "recommendation": "Manually review and confirm exploitability.",
                 "references": [cwe] if cwe else [],
             }
@@ -217,9 +235,15 @@ def extract_decision_metadata(raw: str) -> tuple[list[str], list[str]]:
     try:
         obj = _extract_json(raw)
     except Exception:
-        return [], []
-    candidate_cwes = obj.get("candidate_cwes", [])
-    missing_context_symbols = obj.get("missing_context_symbols", [])
+        parsed = _extract_final_answer_format(raw)
+        if parsed is None:
+            return [], []
+        candidate_cwes = parsed.get("candidate_cwes", [])
+        missing_context_symbols = parsed.get("missing_context_symbols", [])
+    else:
+        candidate_cwes = obj.get("candidate_cwes", [])
+        missing_context_symbols = obj.get("missing_context_symbols", [])
+
     cwes = [str(x).strip().upper() for x in candidate_cwes if str(x).strip()]
     symbols = [str(x).strip() for x in missing_context_symbols if str(x).strip()]
     return cwes, symbols
@@ -229,11 +253,13 @@ def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[
     findings: list[Finding] = []
     try:
         try:
-            obj = _extract_json(raw)
+            compact_obj = _extract_final_answer_format(raw)
+            if compact_obj is not None:
+                obj = compact_obj
+            else:
+                obj = _extract_json(raw)
         except ValueError:
-            obj = _extract_final_answer_format(raw)
-            if obj is None:
-                raise
+            raise
         vulns = obj.get("vulnerabilities", [])
         if not isinstance(vulns, list):
             raise ValueError("vulnerabilities must be list")

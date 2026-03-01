@@ -102,3 +102,37 @@ def test_build_prompt_collapses_sequential_blank_lines_after_comment_strip():
 
     assert "int x = 1;\n\n\n    int y = x + 1;" not in prompt
     assert "int x = 1;\n\n    int y = x + 1;" in prompt
+
+
+def test_build_prompt_uses_compact_single_pass_contract_by_default():
+    cfg = Config(path=".")
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="foo",
+        text="int foo(void) { return 0; }\n",
+    )
+
+    prompt = build_prompt(cfg, chunk, index_context="")
+
+    assert "#judge: yes|no" in prompt
+    assert "#type: CWE-xx|N/A" in prompt
+    assert "BEGIN_FINDINGS_JSON" not in prompt
+
+
+def test_build_prompt_uses_json_contract_when_dual_step_enabled():
+    cfg = Config(path=".")
+    cfg.scan.dual_step = True
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="foo",
+        text="int foo(void) { return 0; }\n",
+    )
+
+    prompt = build_prompt(cfg, chunk, index_context="")
+
+    assert "BEGIN_FINDINGS_JSON" in prompt
+    assert '"candidate_cwes": ["CWE-xx", "CWE-yy"]' in prompt

@@ -136,6 +136,9 @@ def _build_chunks(path: Path, root: Path, strategy: str, chunk_tokens: int, over
 def _index_context(index: ProjectIndex | None, chunk: CodeChunk) -> str:
     if index is None or not chunk.function:
         return ""
+    packet = index.build_context_packet(chunk.function, current_file=chunk.file)
+    if packet:
+        return packet
     refs = index.query_symbol(chunk.function)
     if not refs:
         return ""
@@ -148,14 +151,17 @@ def _requested_symbol_context(index: ProjectIndex | None, symbols: list[str]) ->
     lines: list[str] = []
     for symbol in symbols[:8]:
         refs = index.query_symbol(symbol)
-        if not refs:
-            continue
+        definition = index.get_function_definition(symbol, max_lines=16)
         lines.append(f"- {symbol}:")
-        for file_name, line in refs[:5]:
-            lines.append(f"  - {file_name}:{line}")
+        if refs:
+            for file_name, line in refs[:3]:
+                lines.append(f"  - location: {file_name}:{line}")
+        if definition:
+            indented = definition.replace("\n", "\n    ")
+            lines.append(f"  - get_function_definition:\n    {indented}")
     if not lines:
         return ""
-    return "Requested symbol locations:\n" + "\n".join(lines)
+    return "Requested symbol context:\n" + "\n".join(lines)
 
 
 def _build_dual_step_verifier_prompt(
@@ -227,6 +233,50 @@ def _apply_phase15_acceptance_gates(
 
         guarded.append(finding)
     return guarded
+
+
+def _normalize_cwe_and_apply_local_evidence_gate(
+    findings: list[Finding],
+    *,
+    chunk: CodeChunk,
+) -> list[Finding]:
+    text = chunk.text.lower()
+    has_memory_sink = any(
+        token in text for token in ("strcpy(", "strcat(", "sprintf(", "memcpy(", "memmove(", "gets(")
+    )
+    has_file_path_use = any(token in text for token in ("fopen(", "open(", "relative_path", "path"))
+    has_mult = "*" in chunk.text
+
+    out: list[Finding] = []
+    for finding in findings:
+        vuln_upper = (finding.vulnerability_type or "").upper()
+
+        # Normalize broad/path CWE variants to project conventions.
+        if vuln_upper == "CWE-73":
+            finding.vulnerability_type = "CWE-22"
+            finding.references = ["CWE-22" if str(r).upper() == "CWE-73" else str(r) for r in finding.references]
+            vuln_upper = "CWE-22"
+        if vuln_upper == "CWE-119" and has_memory_sink:
+            if "sprintf(" in text:
+                finding.vulnerability_type = "CWE-787"
+                finding.references = ["CWE-787" if str(r).upper() == "CWE-119" else str(r) for r in finding.references]
+                vuln_upper = "CWE-787"
+            elif any(token in text for token in ("strcpy(", "strcat(", "gets(")):
+                finding.vulnerability_type = "CWE-120"
+                finding.references = ["CWE-120" if str(r).upper() == "CWE-119" else str(r) for r in finding.references]
+                vuln_upper = "CWE-120"
+
+        # Precision-first local evidence gate for compact single-pass outputs.
+        if finding.evidence_spans == 0 and finding.analysis_mode == "shallow":
+            if vuln_upper in {"CWE-119", "CWE-120", "CWE-121", "CWE-125", "CWE-787"} and not has_memory_sink:
+                continue
+            if vuln_upper in {"CWE-22"} and not has_file_path_use:
+                continue
+            if vuln_upper in {"CWE-190"} and not has_mult:
+                continue
+
+        out.append(finding)
+    return out
 
 
 def _filter_by_candidate_policy(findings: list[Finding], candidate_cwes: list[str]) -> list[Finding]:
@@ -679,23 +729,113 @@ def run() -> int:
                 parsed_findings, next_id2 = parse_findings(result.text, chunk, start_id=next_id)
                 parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
                 if parse_errors:
-                    parse_error = parse_errors[0].parse_error or "unknown parse error"
-                    msg = (
-                        "Marking chunk unresolved due to unparsable model output "
-                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                        f"function={chunk.function or 'N/A'}): {parse_error}"
-                    )
-                    log.warning(msg)
-                    print(msg, file=sys.stderr)
-                    fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
-                    if fallback_findings:
-                        next_id = fallback_next_id
-                        successful_chunks += 1
-                        return fallback_findings
-                    failed_chunks += 1
-                    return []
+                    max_retries = max(0, int(cfg.inference.retries))
+                    base_seed = int(base_params.seed)
+                    for retry_attempt in range(1, max_retries + 1):
+                        retry_seed = base_seed + retry_attempt
+                        msg = (
+                            "Unparsable model output; retrying with different seed "
+                            f"(attempt {retry_attempt}/{max_retries}, seed={retry_seed}) "
+                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                            f"function={chunk.function or 'N/A'})"
+                        )
+                        log.warning(msg)
+                        print(msg, file=sys.stderr)
+
+                        retry_params = replace(base_params, seed=retry_seed)
+                        used_seed = retry_seed
+                        t_retry = time.perf_counter()
+                        try:
+                            retry_result = backend.generate(prompt, retry_params)
+                        except Exception as e:  # noqa: BLE001
+                            elapsed_retry = max(0.0, time.perf_counter() - t_retry)
+                            total_exchange_time_sec += elapsed_retry
+                            exchange_count += 1
+                            msg = (
+                                "Skipping parse-retry attempt due to exchange exception "
+                                f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                                f"function={chunk.function or 'N/A'}, seed={retry_seed}): {e}"
+                            )
+                            log.exception(msg)
+                            print(msg, file=sys.stderr)
+                            continue
+
+                        elapsed_retry = max(0.0, time.perf_counter() - t_retry)
+                        total_exchange_time_sec += elapsed_retry
+                        exchange_count += 1
+                        if not retry_result.error:
+                            retry_prompt_tokens = (
+                                retry_result.prompt_tokens
+                                if retry_result.prompt_tokens is not None
+                                else _approx_tokens(prompt)
+                            )
+                            retry_completion_tokens = (
+                                retry_result.completion_tokens
+                                if retry_result.completion_tokens is not None
+                                else _approx_tokens(retry_result.text, allow_zero=True)
+                            )
+                            retry_total_tokens = (
+                                retry_result.total_tokens
+                                if retry_result.total_tokens is not None
+                                else retry_prompt_tokens + retry_completion_tokens
+                            )
+                            total_exchange_tokens += max(0, int(retry_total_tokens))
+
+                        if prompt_output_path is not None:
+                            prompt_output_entry += 1
+                            if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
+                                _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+                                _append_inference_metadata_section(
+                                    prompt_output_path,
+                                    timestamp_local=retry_result.timestamp_local,
+                                    context_size=(retry_result.context_size or cfg.inference.context),
+                                    context_events=retry_result.context_events,
+                                    seed=retry_seed,
+                                )
+                            if cfg.logging.log_prompts:
+                                _append_prompt_section(prompt_output_path, prompt)
+                            if cfg.logging.log_model_outputs:
+                                _append_output_section(
+                                    prompt_output_path,
+                                    retry_result.text,
+                                    retry_result.error,
+                                )
+
+                        if retry_result.error:
+                            msg = (
+                                "Skipping parse-retry attempt due to inference error "
+                                f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                                f"function={chunk.function or 'N/A'}, seed={retry_seed}): {retry_result.error}"
+                            )
+                            log.warning(msg)
+                            print(msg, file=sys.stderr)
+                            continue
+
+                        parsed_findings, next_id2 = parse_findings(retry_result.text, chunk, start_id=next_id)
+                        parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
+                        if not parse_errors:
+                            result = retry_result
+                            break
+
+                    if parse_errors:
+                        parse_error = parse_errors[0].parse_error or "unknown parse error"
+                        msg = (
+                            "Marking chunk unresolved due to unparsable model output "
+                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                            f"function={chunk.function or 'N/A'}): {parse_error}"
+                        )
+                        log.warning(msg)
+                        print(msg, file=sys.stderr)
+                        fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
+                        if fallback_findings:
+                            next_id = fallback_next_id
+                            successful_chunks += 1
+                            return fallback_findings
+                        failed_chunks += 1
+                        return []
 
                 parsed_findings = _normalize_exploitability_classification(parsed_findings)
+                parsed_findings = _normalize_cwe_and_apply_local_evidence_gate(parsed_findings, chunk=chunk)
 
                 if cfg.scan.dual_step:
                     candidate_cwes, missing_symbols = extract_decision_metadata(result.text)
@@ -781,22 +921,112 @@ def run() -> int:
                     parsed_findings, next_id2 = parse_findings(verifier_result.text, chunk, start_id=next_id)
                     parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
                     if parse_errors:
-                        parse_error = parse_errors[0].parse_error or "unknown parse error"
-                        msg = (
-                            "Marking chunk unresolved due to unparsable verifier output "
-                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                            f"function={chunk.function or 'N/A'}): {parse_error}"
-                        )
-                        log.warning(msg)
-                        print(msg, file=sys.stderr)
-                        fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
-                        if fallback_findings:
-                            next_id = fallback_next_id
-                            successful_chunks += 1
-                            return fallback_findings
-                        failed_chunks += 1
-                        return []
+                        max_retries = max(0, int(cfg.inference.retries))
+                        base_seed = int(verifier_params.seed)
+                        for retry_attempt in range(1, max_retries + 1):
+                            retry_seed = base_seed + retry_attempt
+                            msg = (
+                                "Unparsable verifier output; retrying with different seed "
+                                f"(attempt {retry_attempt}/{max_retries}, seed={retry_seed}) "
+                                f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                                f"function={chunk.function or 'N/A'})"
+                            )
+                            log.warning(msg)
+                            print(msg, file=sys.stderr)
+
+                            retry_params = replace(verifier_params, seed=retry_seed)
+                            used_seed = retry_seed
+                            t_retry = time.perf_counter()
+                            try:
+                                retry_result = backend.generate(verifier_prompt, retry_params)
+                            except Exception as e:  # noqa: BLE001
+                                elapsed_retry = max(0.0, time.perf_counter() - t_retry)
+                                total_exchange_time_sec += elapsed_retry
+                                exchange_count += 1
+                                msg = (
+                                    "Skipping verifier parse-retry attempt due to exchange exception "
+                                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                                    f"function={chunk.function or 'N/A'}, seed={retry_seed}): {e}"
+                                )
+                                log.exception(msg)
+                                print(msg, file=sys.stderr)
+                                continue
+
+                            elapsed_retry = max(0.0, time.perf_counter() - t_retry)
+                            total_exchange_time_sec += elapsed_retry
+                            exchange_count += 1
+                            if not retry_result.error:
+                                retry_prompt_tokens = (
+                                    retry_result.prompt_tokens
+                                    if retry_result.prompt_tokens is not None
+                                    else _approx_tokens(verifier_prompt)
+                                )
+                                retry_completion_tokens = (
+                                    retry_result.completion_tokens
+                                    if retry_result.completion_tokens is not None
+                                    else _approx_tokens(retry_result.text, allow_zero=True)
+                                )
+                                retry_total_tokens = (
+                                    retry_result.total_tokens
+                                    if retry_result.total_tokens is not None
+                                    else retry_prompt_tokens + retry_completion_tokens
+                                )
+                                total_exchange_tokens += max(0, int(retry_total_tokens))
+
+                            if prompt_output_path is not None:
+                                prompt_output_entry += 1
+                                if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
+                                    _append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+                                    _append_inference_metadata_section(
+                                        prompt_output_path,
+                                        timestamp_local=retry_result.timestamp_local,
+                                        context_size=(retry_result.context_size or cfg.inference.context),
+                                        context_events=retry_result.context_events,
+                                        seed=retry_seed,
+                                    )
+                                if cfg.logging.log_prompts:
+                                    _append_prompt_section(prompt_output_path, verifier_prompt)
+                                if cfg.logging.log_model_outputs:
+                                    _append_output_section(
+                                        prompt_output_path,
+                                        retry_result.text,
+                                        retry_result.error,
+                                    )
+
+                            if retry_result.error:
+                                msg = (
+                                    "Skipping verifier parse-retry attempt due to inference error "
+                                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                                    f"function={chunk.function or 'N/A'}, seed={retry_seed}): {retry_result.error}"
+                                )
+                                log.warning(msg)
+                                print(msg, file=sys.stderr)
+                                continue
+
+                            parsed_findings, next_id2 = parse_findings(retry_result.text, chunk, start_id=next_id)
+                            parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
+                            if not parse_errors:
+                                verifier_result = retry_result
+                                break
+
+                        if parse_errors:
+                            parse_error = parse_errors[0].parse_error or "unknown parse error"
+                            msg = (
+                                "Marking chunk unresolved due to unparsable verifier output "
+                                f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                                f"function={chunk.function or 'N/A'}): {parse_error}"
+                            )
+                            log.warning(msg)
+                            print(msg, file=sys.stderr)
+                            fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
+                            if fallback_findings:
+                                next_id = fallback_next_id
+                                successful_chunks += 1
+                                return fallback_findings
+                            failed_chunks += 1
+                            return []
                     parsed_findings = _normalize_exploitability_classification(parsed_findings)
+                    parsed_findings = _normalize_cwe_and_apply_local_evidence_gate(parsed_findings, chunk=chunk)
                     parsed_findings = _filter_by_candidate_policy(parsed_findings, candidate_cwes)
                 if parsed_findings:
                     parsed_findings, next_id2 = _augment_with_heuristic_findings(parsed_findings, chunk, next_id2)

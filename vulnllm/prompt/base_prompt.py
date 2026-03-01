@@ -5,7 +5,39 @@ from vulnllm.config import Config
 from vulnllm.prompt.focus_injector import build_focus_block
 from vulnllm.prompt.profiles.embedded_c import EMBEDDED_C_GUIDANCE
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_SINGLE_PASS = """
+You are a vulnerability detection model for C/C++ code.
+Analyze one target function with optional helper context.
+Input sections are separated by:
+- // context
+- // target function
+
+Output format (plain text, exactly these keys):
+#judge: yes|no
+#type: CWE-xx|N/A
+#confidence: low|medium|high
+#need_context: N/A|symbol_a,symbol_b
+#why: one short sentence
+
+Rules:
+- Output one most probable CWE only when judge=yes.
+- If judge=no, set type=N/A.
+- Keep #why concise and evidence-grounded.
+- If a Contract Summary is present in context, treat it as high-priority evidence.
+- If issue depends on unseen callee internals, set #judge: no and request symbols via #need_context.
+- Report CWE-190 only when overflow is demonstrable from visible bounds/constants/call-path values; otherwise set #judge: no.
+- Do not flag a vulnerability in the target function based only on hypothetical caller misuse when the shown call path is safe.
+- Use sink-matched CWE mapping:
+  - strcpy/strcat/gets into fixed buffer -> CWE-120
+  - sprintf into fixed buffer -> CWE-787
+  - unvalidated file path composition/open -> CWE-22
+- Do not output CWE-78 unless command execution APIs are present (system/popen/exec*).
+- Do not output CWE-190 for pure string/path handling functions without relevant numeric arithmetic.
+- Do not output JSON, markdown fences, or extra prose.
+""".strip()
+
+
+SYSTEM_PROMPT_DUAL_STEP = """
 You are a vulnerability detection model for C/C++ code.
 Analyze one target function with optional helper context.
 Input sections are separated by:
@@ -39,6 +71,7 @@ Rules:
 - Produce 2-5 candidate CWEs.
 - If judge=yes, use exactly one CWE in final_answer.type and keep it consistent with vulnerabilities.
 - If judge=no, set type=N/A and vulnerabilities=[].
+- If a Contract Summary is present in context, treat it as high-priority evidence.
 - Prefer one primary vulnerability, but include up to two findings when distinct high-impact root causes coexist in the same function.
 - If context is insufficient, prefer judge=no and list missing_context_symbols.
 - Do not report speculative callee-only issues in wrapper/dispatcher functions; if issue depends on unseen callee internals, use missing_context_symbols and judge=no.
@@ -157,7 +190,8 @@ def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
         f"file={chunk.file}, lines={chunk.start_line}-{chunk.end_line}, "
         f"function={chunk.function or 'N/A'}, mode={cfg.scan.mode}"
     )
-    parts = [SYSTEM_PROMPT, profile]
+    system_prompt = SYSTEM_PROMPT_DUAL_STEP if cfg.scan.dual_step else SYSTEM_PROMPT_SINGLE_PASS
+    parts = [system_prompt, profile]
     if focus:
         parts.append(focus)
     parts.append("Chunk metadata: " + metadata)
