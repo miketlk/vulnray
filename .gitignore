@@ -38,3 +38,4 @@ whitepaper
 benchmarks
 tests/test_phase*
 features
+*.zip
