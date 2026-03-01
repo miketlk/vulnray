@@ -22,7 +22,51 @@ class Finding:
     reasoning: str
     references: list[str] = field(default_factory=list)
     recommendation: str = ""
+    analysis_mode: str = "shallow"
+    evidence_spans: int = 0
+    requires_caller_violation: bool = False
+    context_sufficiency: str = "unknown"
     parse_error: str | None = None
+
+
+def _normalize_analysis_mode(value: object) -> str:
+    mode = str(value or "shallow").strip().lower()
+    if mode in {"shallow", "contract-aware", "verified"}:
+        return mode
+    return "shallow"
+
+
+def _parse_evidence_spans_count(value: object) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if trimmed.isdigit():
+            return int(trimmed)
+    return 0
+
+
+def _parse_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "0", "no", "n"}:
+            return False
+    return default
+
+
+def _normalize_context_sufficiency(value: object) -> str:
+    normalized = str(value or "unknown").strip().lower()
+    if normalized in {"sufficient", "insufficient", "unknown"}:
+        return normalized
+    return "unknown"
 
 
 def _extract_json(raw: str) -> dict:
@@ -154,6 +198,10 @@ def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[
                 reasoning=str(v.get("reasoning", "")),
                 references=[str(x) for x in v.get("references", []) if x],
                 recommendation=str(v.get("recommendation", "")),
+                analysis_mode=_normalize_analysis_mode(v.get("analysis_mode", "shallow")),
+                evidence_spans=_parse_evidence_spans_count(v.get("evidence_spans")),
+                requires_caller_violation=_parse_bool(v.get("requires_caller_violation"), default=False),
+                context_sufficiency=_normalize_context_sufficiency(v.get("context_sufficiency", "unknown")),
             )
             findings.append(f)
             next_id += 1

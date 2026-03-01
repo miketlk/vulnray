@@ -48,6 +48,10 @@ def test_reports_generation(tmp_path: Path):
     md_text = md_path.read_text(encoding="utf-8")
 
     assert data["summary"]["total_findings"] == 1
+    assert data["findings"][0]["analysis_mode"] == "shallow"
+    assert data["findings"][0]["evidence_spans"] == 0
+    assert data["findings"][0]["requires_caller_violation"] is False
+    assert data["findings"][0]["context_sufficiency"] == "unknown"
     assert "Buffer Overflow" in csv_path.read_text(encoding="utf-8")
     assert "# Vulnray Scan Report" in md_text
     assert "[Executive Summary](#executive-summary) | [Findings Table](#findings-table)" in md_text

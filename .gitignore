@@ -35,3 +35,6 @@ pip-wheel-metadata/
 tutorial/reports
 examples
 whitepaper
+benchmarks
+tests/test_phase*
+features

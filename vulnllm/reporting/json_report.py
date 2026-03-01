@@ -20,6 +20,10 @@ def _finding_to_json_item(f: Finding, include_reasoning: bool = True) -> dict:
         "severity": f.severity,
         "confidence": f.confidence,
         "description": f.description,
+        "analysis_mode": f.analysis_mode,
+        "evidence_spans": f.evidence_spans,
+        "requires_caller_violation": f.requires_caller_violation,
+        "context_sufficiency": f.context_sufficiency,
         "references": f.references,
         "recommendation": f.recommendation,
     }

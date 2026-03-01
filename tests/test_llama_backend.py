@@ -130,6 +130,36 @@ def test_parse_findings_accepts_final_answer_format_no():
     assert findings == []
 
 
+def test_parse_findings_parses_phase0_telemetry_fields():
+    raw = """
+{
+  "vulnerabilities": [
+    {
+      "vulnerability_type": "CWE-125",
+      "severity": "high",
+      "confidence": 0.91,
+      "description": "desc",
+      "reasoning": "reason",
+      "recommendation": "fix",
+      "references": ["CWE-125"],
+      "analysis_mode": "contract-aware",
+      "evidence_spans": [{"line": 10}, {"line": 12}],
+      "requires_caller_violation": "true",
+      "context_sufficiency": "sufficient"
+    }
+  ]
+}
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].analysis_mode == "contract-aware"
+    assert findings[0].evidence_spans == 2
+    assert findings[0].requires_caller_violation is True
+    assert findings[0].context_sufficiency == "sufficient"
+
+
 def test_llama_backend_populates_usage_metrics(tmp_path: Path, monkeypatch):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"GGUF")
