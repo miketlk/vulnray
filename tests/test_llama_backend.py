@@ -101,6 +101,18 @@ Human: let's keep going
     assert findings[0].vulnerability_type == "Integer Overflow"
 
 
+def test_parse_findings_keeps_first_schema_valid_object_only():
+    raw = """
+{"vulnerabilities":[{"vulnerability_type":"CWE-190","severity":"high","confidence":0.9,"description":"first","reasoning":"r","recommendation":"fix","references":["CWE-190"]}]}
+{"vulnerabilities":[{"vulnerability_type":"CWE-787","severity":"high","confidence":0.9,"description":"second","reasoning":"r","recommendation":"fix","references":["CWE-787"]}]}
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].vulnerability_type == "CWE-190"
+
+
 def test_parse_findings_accepts_final_answer_format_yes():
     raw = """
 <reasoning>
@@ -142,6 +154,10 @@ def test_parse_findings_parses_phase0_telemetry_fields():
       "reasoning": "reason",
       "recommendation": "fix",
       "references": ["CWE-125"],
+      "exploitability": "practical",
+      "contract_breach_evidence": "true",
+      "attacker_controlled_input": "true",
+      "bounds_contradiction_evidence": "true",
       "analysis_mode": "contract-aware",
       "evidence_spans": [{"line": 10}, {"line": 12}],
       "requires_caller_violation": "true",
@@ -158,6 +174,9 @@ def test_parse_findings_parses_phase0_telemetry_fields():
     assert findings[0].evidence_spans == 2
     assert findings[0].requires_caller_violation is True
     assert findings[0].context_sufficiency == "sufficient"
+    assert findings[0].contract_breach_evidence is True
+    assert findings[0].attacker_controlled_input is True
+    assert findings[0].bounds_contradiction_evidence is True
 
 
 def test_extract_decision_metadata_parses_candidate_cwes_and_missing_symbols():

@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-import json
-
 from vulnllm.chunking.function_chunker import CodeChunk
 from vulnllm.config import Config
 from vulnllm.prompt.focus_injector import build_focus_block
 from vulnllm.prompt.profiles.embedded_c import EMBEDDED_C_GUIDANCE
 
 SYSTEM_PROMPT = """
-You are an advanced vulnerability detection model.
-Your task is to decide whether the target function is vulnerable.
-The input code can include helper context and target code, separated by:
+You are a vulnerability detection model for C/C++ code.
+Analyze one target function with optional helper context.
+Input sections are separated by:
 - // context
 - // target function
 
-Reason about memory safety, integer bounds, pointer validity, lifetime, trust boundaries,
-and privilege-sensitive behavior before deciding.
-
-Return ONLY JSON using this shape:
+Return one JSON payload:
+BEGIN_FINDINGS_JSON
 {
   "candidate_cwes": ["CWE-xx", "CWE-yy"],
   "final_answer": {
@@ -32,25 +28,25 @@ Return ONLY JSON using this shape:
       "confidence": 0.0,
       "description": "short explanation",
       "reasoning": "detailed reasoning",
-      "claim": "concrete security claim",
-      "precondition": "required condition for bug to trigger",
-      "where_precondition_is_enforced": "line refs or none",
-      "trigger_path": "caller-to-sink path or local path",
-      "exploitability": "practical|theoretical|contract-break-only",
       "recommendation": "how to fix",
       "references": ["CWE-xxx"]
     }
   ]
 }
+END_FINDINGS_JSON
 
-Constraints:
-- Produce 2-5 candidate CWEs in candidate_cwes.
-- If judge is "yes", use exactly one most probable CWE in final_answer.type.
-- If judge is "no", final_answer.type must be "N/A" and vulnerabilities must be [].
-- Do not report CWE-476/CWE-125/CWE-787/CWE-121/CWE-190 unless you can show:
-  attacker control, missing caller-chain contract enforcement, or contradiction with nearby assertions/macros.
-- If exploitability is contract-break-only, include evidence of contract breach; otherwise set judge=no.
-- Do not wrap JSON in markdown.
+Rules:
+- Produce 2-5 candidate CWEs.
+- If judge=yes, use exactly one CWE in final_answer.type and keep it consistent with vulnerabilities.
+- If judge=no, set type=N/A and vulnerabilities=[].
+- Prefer one primary vulnerability, but include up to two findings when distinct high-impact root causes coexist in the same function.
+- If context is insufficient, prefer judge=no and list missing_context_symbols.
+- Do not report speculative callee-only issues in wrapper/dispatcher functions; if issue depends on unseen callee internals, use missing_context_symbols and judge=no.
+- Optional telemetry fields are allowed: claim, precondition, where_precondition_is_enforced, trigger_path, exploitability, contract_breach_evidence, attacker_controlled_input, bounds_contradiction_evidence.
+- For fixed-size buffer + sprintf/strcpy sinks, include a memory corruption finding even when another issue (e.g., path traversal) is also present.
+- For unchecked integer multiplication on signed/width-limited ints, include CWE-190 when no bounds check is visible.
+- Output compact JSON only once. No markdown fences. No repeated payloads. No explanations.
+- Do not add prose outside BEGIN/END markers.
 """.strip()
 
 
@@ -157,17 +153,14 @@ def _strip_c_comments(text: str) -> str:
 def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
     profile = EMBEDDED_C_GUIDANCE if cfg.prompt.profile == "embedded-c" else ""
     focus = build_focus_block(cfg.prompt.focus, cfg.prompt.prompt_file)
-    metadata = {
-        "file": chunk.file,
-        "start_line": chunk.start_line,
-        "end_line": chunk.end_line,
-        "function": chunk.function,
-        "mode": cfg.scan.mode,
-    }
+    metadata = (
+        f"file={chunk.file}, lines={chunk.start_line}-{chunk.end_line}, "
+        f"function={chunk.function or 'N/A'}, mode={cfg.scan.mode}"
+    )
     parts = [SYSTEM_PROMPT, profile]
     if focus:
         parts.append(focus)
-    parts.append("Chunk metadata:\n" + json.dumps(metadata, indent=2))
+    parts.append("Chunk metadata: " + metadata)
     context_text = _as_comment_block(index_context.strip() or "N/A")
     code_snippet = "\n".join(["// context", context_text, "// target function", _strip_c_comments(chunk.text)])
     parts.append("Code snippet:\n```c\n" + code_snippet + "\n```")

@@ -85,6 +85,13 @@ class LlamaBackend:
             temperature=params.temperature,
             top_p=params.top_p,
             seed=params.seed,
+            stop=[
+                "END_FINDINGS_JSON",
+                "\n## Explanation",
+                "\nThe JSON output",
+                "\n``` ```json",
+                "\n\nJSON output:",
+            ],
         )
 
     def _from_output(

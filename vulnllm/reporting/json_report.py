@@ -26,6 +26,8 @@ def _finding_to_json_item(f: Finding, include_reasoning: bool = True) -> dict:
         "trigger_path": f.trigger_path,
         "exploitability": f.exploitability,
         "contract_breach_evidence": f.contract_breach_evidence,
+        "attacker_controlled_input": f.attacker_controlled_input,
+        "bounds_contradiction_evidence": f.bounds_contradiction_evidence,
         "analysis_mode": f.analysis_mode,
         "evidence_spans": f.evidence_spans,
         "requires_caller_violation": f.requires_caller_violation,

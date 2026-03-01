@@ -30,8 +30,8 @@ batch = 512
 temperature = 0.1
 top_p = 0.95
 seed = 0
-gpu_layers = -1
-max_tokens = 1400
+gpu_layers = 0
+max_tokens = 700
 
 [output]
 formats = ["json", "csv", "md"]

@@ -28,6 +28,8 @@ class Finding:
     trigger_path: str = ""
     exploitability: str = "theoretical"
     contract_breach_evidence: bool = False
+    attacker_controlled_input: bool = False
+    bounds_contradiction_evidence: bool = False
     analysis_mode: str = "shallow"
     evidence_spans: int = 0
     requires_caller_violation: bool = False
@@ -97,36 +99,6 @@ def _extract_json(raw: str) -> dict:
         return json.loads(block)
 
     decoder = json.JSONDecoder()
-    best_any: dict | None = None
-    best_scored: tuple[int, dict] | None = None
-
-    def score_obj(obj: dict) -> int:
-        score = 0
-        final_answer = obj.get("final_answer")
-        if isinstance(final_answer, dict):
-            if isinstance(final_answer.get("judge"), str):
-                score += 8
-            if isinstance(final_answer.get("type"), str):
-                score += 8
-        vulns = obj.get("vulnerabilities")
-        if isinstance(vulns, list):
-            score += 20
-            score += min(len(vulns), 5)
-            for v in vulns:
-                if not isinstance(v, dict):
-                    continue
-                for key in (
-                    "vulnerability_type",
-                    "severity",
-                    "confidence",
-                    "description",
-                    "reasoning",
-                    "recommendation",
-                    "references",
-                ):
-                    if key in v:
-                        score += 1
-        return score
     idx = 0
     while True:
         idx = raw.find("{", idx)
@@ -137,20 +109,11 @@ def _extract_json(raw: str) -> dict:
         except json.JSONDecodeError:
             idx += 1
             continue
-        if isinstance(obj, dict):
-            if best_any is None:
-                best_any = obj
-            score = score_obj(obj)
-            if best_scored is None or score > best_scored[0]:
-                best_scored = (score, obj)
+        if isinstance(obj, dict) and _is_schema_valid_json_object(obj):
+            return obj
         idx += 1
-
-    if best_scored is not None:
-        return best_scored[1]
-    if best_any is not None:
-        return best_any
     repaired = _repair_json_payload(raw)
-    if repaired is not None:
+    if repaired is not None and _is_schema_valid_json_object(repaired):
         return repaired
     raise ValueError("No JSON object found")
 
@@ -166,16 +129,59 @@ def _repair_json_payload(raw: str) -> dict | None:
         return None
 
     start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
+    if start == -1:
         return None
-    candidate = text[start : end + 1]
+    candidate = text[start:]
     # Conservative local repair for common tailing-comma JSON issues.
     candidate = re.sub(r",(\s*[}\]])", r"\1", candidate)
+    # Repair common duplicated list terminator seen in noisy generations.
+    candidate = re.sub(r"\]\s*\]\s*}", "]}", candidate)
+    decoder = json.JSONDecoder()
     try:
-        return json.loads(candidate)
+        obj, _ = decoder.raw_decode(candidate)
     except json.JSONDecodeError:
         return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _is_schema_valid_json_object(obj: dict) -> bool:
+    vulns = obj.get("vulnerabilities")
+    if not isinstance(vulns, list):
+        return False
+
+    final_answer = obj.get("final_answer")
+    has_valid_final_answer = (
+        isinstance(final_answer, dict)
+        and isinstance(final_answer.get("judge"), str)
+        and isinstance(final_answer.get("type"), str)
+    )
+    has_policy_metadata = isinstance(obj.get("candidate_cwes"), list) or isinstance(
+        obj.get("missing_context_symbols"), list
+    )
+
+    if not vulns:
+        return has_valid_final_answer or has_policy_metadata
+
+    for item in vulns:
+        if not isinstance(item, dict):
+            return False
+        # Keep schema checks permissive: many model outputs omit optional fields,
+        # and downstream normalization fills defaults.
+        if "vulnerability_type" not in item:
+            return False
+        if not any(
+            key in item
+            for key in (
+                "severity",
+                "description",
+                "reasoning",
+                "recommendation",
+                "references",
+                "confidence",
+            )
+        ):
+            return False
+    return True
 
 
 def _extract_final_answer_format(raw: str) -> dict | None:
@@ -255,6 +261,8 @@ def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[
                 trigger_path=str(v.get("trigger_path", "")),
                 exploitability=_normalize_exploitability(v.get("exploitability", "theoretical")),
                 contract_breach_evidence=_parse_bool(v.get("contract_breach_evidence"), default=False),
+                attacker_controlled_input=_parse_bool(v.get("attacker_controlled_input"), default=False),
+                bounds_contradiction_evidence=_parse_bool(v.get("bounds_contradiction_evidence"), default=False),
                 analysis_mode=_normalize_analysis_mode(v.get("analysis_mode", "shallow")),
                 evidence_spans=_parse_evidence_spans_count(v.get("evidence_spans")),
                 requires_caller_violation=_parse_bool(v.get("requires_caller_violation"), default=False),

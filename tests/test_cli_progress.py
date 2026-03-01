@@ -36,6 +36,9 @@ def test_progress_prints_during_multipass(monkeypatch, tmp_path: Path, capsys):
                                 "confidence": 0.5,
                                 "description": "d",
                                 "reasoning": "r",
+                                "exploitability": "practical",
+                                "attacker_controlled_input": True,
+                                "evidence_spans": 1,
                                 "recommendation": "x",
                                 "references": ["CWE-000"],
                             }
@@ -564,9 +567,62 @@ def test_scan_marks_chunk_unresolved_on_unparsable_output_without_retry(monkeypa
     assert "Marking chunk unresolved due to unparsable model output" in caplog.text
 
 
+def test_scan_uses_heuristic_fallback_for_unparsable_unsafe_sink(monkeypatch, tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "void write_user_file(const char *relative_path) {\n"
+        "    char path[64];\n"
+        '    sprintf(path, "%s/%s", "./data", relative_path);\n'
+        '    FILE *fp = fopen(path, "w");\n'
+        "    if (fp) fclose(fp);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(text="not-json", error=None)
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    rc = run()
+    report = (out_dir / "scan.json").read_text(encoding="utf-8")
+    assert rc == 1
+    assert "CWE-787" in report
+    assert "CWE-22" in report
+
+
 def test_scan_repairs_unparsable_json_output_locally(monkeypatch, tmp_path: Path, caplog):
     src = tmp_path / "main.c"
-    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    src.write_text(
+        "int add(size_t size, int a, int b) {\n"
+        "    if (size < 8) return a;\n"
+        "    VERIFY_CHECK(size < 1024);\n"
+        "    return a + b;\n"
+        "}\n",
+        encoding="utf-8",
+    )
     model = tmp_path / "model.gguf"
     model.write_bytes(b"GGUF")
     out_dir = tmp_path / "reports"
@@ -579,7 +635,7 @@ def test_scan_repairs_unparsable_json_output_locally(monkeypatch, tmp_path: Path
         def generate(self, _prompt, params):
             seen_seeds.append(params.seed)
             return InferenceResult(
-                text='```json\n{"vulnerabilities":[{"vulnerability_type":"CWE-190","severity":"high","confidence":0.8,"description":"d","reasoning":"r","recommendation":"fix","references":["CWE-190"],}],}\n```',
+                text='```json\n{"vulnerabilities":[{"vulnerability_type":"CWE-190","severity":"high","confidence":0.8,"description":"d","reasoning":"r","recommendation":"fix","references":["CWE-190"],"evidence_spans":1,"exploitability":"practical","attacker_controlled_input":true,"bounds_contradiction_evidence":true}],}\n```',
                 error=None,
             )
 
@@ -608,3 +664,115 @@ def test_scan_repairs_unparsable_json_output_locally(monkeypatch, tmp_path: Path
     assert rc == 1
     assert seen_seeds == [11]
     assert "Marking chunk unresolved due to unparsable model output" not in caplog.text
+
+
+def test_scan_accepts_findings_without_evidence_spans_after_gate_relaxation(monkeypatch, tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(
+                text=json.dumps(
+                    {
+                        "vulnerabilities": [
+                            {
+                                "vulnerability_type": "CWE-120",
+                                "severity": "high",
+                                "confidence": 0.8,
+                                "description": "d",
+                                "reasoning": "r",
+                                "recommendation": "fix",
+                                "references": ["CWE-120"],
+                                "exploitability": "practical",
+                                "attacker_controlled_input": True,
+                                "bounds_contradiction_evidence": True,
+                                "evidence_spans": 0,
+                            }
+                        ]
+                    }
+                ),
+                error=None,
+            )
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    rc = run()
+    assert rc == 1
+
+
+def test_scan_accepts_calibrated_cwe_without_bounds_contradiction_after_gate_relaxation(monkeypatch, tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(
+                text=json.dumps(
+                    {
+                        "vulnerabilities": [
+                            {
+                                "vulnerability_type": "CWE-190",
+                                "severity": "high",
+                                "confidence": 0.8,
+                                "description": "d",
+                                "reasoning": "r",
+                                "recommendation": "fix",
+                                "references": ["CWE-190"],
+                                "exploitability": "practical",
+                                "attacker_controlled_input": True,
+                                "evidence_spans": 1,
+                                "bounds_contradiction_evidence": False,
+                            }
+                        ]
+                    }
+                ),
+                error=None,
+            )
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    rc = run()
+    assert rc == 1

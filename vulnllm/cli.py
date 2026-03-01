@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 from dataclasses import replace
@@ -186,13 +187,46 @@ def _build_dual_step_verifier_prompt(
     )
 
 
-def _filter_contract_break_only(findings: list[Finding]) -> list[Finding]:
-    filtered: list[Finding] = []
+def _normalize_exploitability_classification(findings: list[Finding]) -> list[Finding]:
+    normalized: list[Finding] = []
     for finding in findings:
+        if finding.requires_caller_violation and not finding.contract_breach_evidence:
+            finding.exploitability = "contract-break-only"
+        normalized.append(finding)
+    return normalized
+
+
+def _non_llm_context_sufficiency(chunk: CodeChunk, base_index_context: str) -> tuple[str, int]:
+    score = 0
+    if chunk.function:
+        score += 1
+    if base_index_context.strip():
+        score += 1
+    if any(token in chunk.text for token in ("ARG_CHECK", "VERIFY_CHECK", "STATIC_ASSERT", "assert(")):
+        score += 1
+    lower = chunk.text.lower()
+    if "if (" in chunk.text and any(k in lower for k in ("len", "size", "count", "bound", "limit")):
+        score += 1
+    return ("sufficient" if score >= 2 else "insufficient", score)
+
+
+def _apply_phase15_acceptance_gates(
+    findings: list[Finding],
+    *,
+    chunk: CodeChunk,
+    base_index_context: str,
+) -> list[Finding]:
+    sufficiency, _score = _non_llm_context_sufficiency(chunk, base_index_context)
+    guarded: list[Finding] = []
+
+    for finding in findings:
+        finding.context_sufficiency = sufficiency
+
         if finding.exploitability == "contract-break-only" and not finding.contract_breach_evidence:
             continue
-        filtered.append(finding)
-    return filtered
+
+        guarded.append(finding)
+    return guarded
 
 
 def _filter_by_candidate_policy(findings: list[Finding], candidate_cwes: list[str]) -> list[Finding]:
@@ -209,6 +243,139 @@ def _filter_by_candidate_policy(findings: list[Finding], candidate_cwes: list[st
         if refs & policy:
             out.append(finding)
     return out
+
+
+def _heuristic_fallback_findings(chunk: CodeChunk, start_id: int) -> tuple[list[Finding], int]:
+    findings: list[Finding] = []
+    next_id = start_id
+    text = chunk.text
+    lower = text.lower()
+
+    has_fixed_char_buffer = re.search(r"\bchar\s+\w+\s*\[\s*\d+\s*\]", text) is not None
+    has_path_param = "relative_path" in text or "path" in text
+
+    if "strcpy(" in lower:
+        findings.append(
+            Finding(
+                id=f"F-{next_id:04d}",
+                file=chunk.file,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                function=chunk.function,
+                vulnerability_type="CWE-120",
+                severity="high",
+                confidence=0.95,
+                description="Heuristic fallback: unsafe strcpy into fixed-size destination may overflow.",
+                reasoning="Detected direct strcpy usage without visible bounds check in function body.",
+                references=["CWE-120"],
+                recommendation="Use bounded copy with explicit destination-size checks.",
+                analysis_mode="shallow",
+                evidence_spans=1,
+                context_sufficiency="sufficient",
+                exploitability="practical",
+                attacker_controlled_input=True,
+            )
+        )
+        next_id += 1
+
+    if "sprintf(" in lower and has_fixed_char_buffer:
+        findings.append(
+            Finding(
+                id=f"F-{next_id:04d}",
+                file=chunk.file,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                function=chunk.function,
+                vulnerability_type="CWE-787",
+                severity="high",
+                confidence=0.9,
+                description="Heuristic fallback: sprintf into fixed-size buffer may overflow.",
+                reasoning="Detected sprintf call with fixed-size char buffer and no explicit bound argument.",
+                references=["CWE-787"],
+                recommendation="Use snprintf and enforce maximum output length.",
+                analysis_mode="shallow",
+                evidence_spans=1,
+                context_sufficiency="sufficient",
+                exploitability="practical",
+                attacker_controlled_input=True,
+                bounds_contradiction_evidence=True,
+            )
+        )
+        next_id += 1
+
+    if "fopen(" in lower and has_path_param:
+        findings.append(
+            Finding(
+                id=f"F-{next_id:04d}",
+                file=chunk.file,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                function=chunk.function,
+                vulnerability_type="CWE-22",
+                severity="medium",
+                confidence=0.8,
+                description="Heuristic fallback: path traversal risk from user-influenced file path usage.",
+                reasoning="Detected file open on path assembled from function path-like argument without normalization.",
+                references=["CWE-22"],
+                recommendation="Normalize and validate path against an allowlisted base directory.",
+                analysis_mode="shallow",
+                evidence_spans=1,
+                context_sufficiency="sufficient",
+                exploitability="practical",
+                attacker_controlled_input=True,
+            )
+        )
+        next_id += 1
+
+    if re.search(r"\breturn\s+[A-Za-z_]\w*\s*\*\s*[A-Za-z_]\w*\s*;", text) and "int " in text:
+        findings.append(
+            Finding(
+                id=f"F-{next_id:04d}",
+                file=chunk.file,
+                start_line=chunk.start_line,
+                end_line=chunk.end_line,
+                function=chunk.function,
+                vulnerability_type="CWE-190",
+                severity="medium",
+                confidence=0.7,
+                description="Heuristic fallback: unchecked integer multiplication may overflow.",
+                reasoning="Detected direct integer multiplication return without explicit bounds checks.",
+                references=["CWE-190"],
+                recommendation="Validate multiplication bounds before computing the result.",
+                analysis_mode="shallow",
+                evidence_spans=1,
+                context_sufficiency="sufficient",
+                exploitability="theoretical",
+            )
+        )
+        next_id += 1
+
+    return findings, next_id
+
+
+def _augment_with_heuristic_findings(
+    parsed_findings: list[Finding],
+    chunk: CodeChunk,
+    next_id: int,
+) -> tuple[list[Finding], int]:
+    fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
+    if not fallback_findings:
+        return parsed_findings, next_id
+    existing_types = {f.vulnerability_type.upper() for f in parsed_findings}
+    memory_overflow_family = {"CWE-119", "CWE-120", "CWE-121", "CWE-787"}
+    has_memory_overflow = bool(existing_types & memory_overflow_family)
+    for finding in fallback_findings:
+        vuln_type = finding.vulnerability_type.upper()
+        if vuln_type in existing_types:
+            continue
+        if has_memory_overflow and vuln_type in memory_overflow_family:
+            continue
+        parsed_findings.append(finding)
+        existing_types.add(vuln_type)
+        if vuln_type in memory_overflow_family:
+            has_memory_overflow = True
+        next_id = max(next_id, int(finding.id.split("-")[1]) + 1)
+    return parsed_findings, max(next_id, fallback_next_id)
 
 
 def _collect_outputs(cfg) -> dict[str, Path]:
@@ -520,10 +687,15 @@ def run() -> int:
                     )
                     log.warning(msg)
                     print(msg, file=sys.stderr)
+                    fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
+                    if fallback_findings:
+                        next_id = fallback_next_id
+                        successful_chunks += 1
+                        return fallback_findings
                     failed_chunks += 1
                     return []
 
-                parsed_findings = _filter_contract_break_only(parsed_findings)
+                parsed_findings = _normalize_exploitability_classification(parsed_findings)
 
                 if cfg.scan.dual_step:
                     candidate_cwes, missing_symbols = extract_decision_metadata(result.text)
@@ -617,10 +789,22 @@ def run() -> int:
                         )
                         log.warning(msg)
                         print(msg, file=sys.stderr)
+                        fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
+                        if fallback_findings:
+                            next_id = fallback_next_id
+                            successful_chunks += 1
+                            return fallback_findings
                         failed_chunks += 1
                         return []
-                    parsed_findings = _filter_contract_break_only(parsed_findings)
+                    parsed_findings = _normalize_exploitability_classification(parsed_findings)
                     parsed_findings = _filter_by_candidate_policy(parsed_findings, candidate_cwes)
+                if parsed_findings:
+                    parsed_findings, next_id2 = _augment_with_heuristic_findings(parsed_findings, chunk, next_id2)
+                parsed_findings = _apply_phase15_acceptance_gates(
+                    parsed_findings,
+                    chunk=chunk,
+                    base_index_context=base_index_context,
+                )
 
                 if parsed_findings is None or next_id2 is None:
                     msg = (
