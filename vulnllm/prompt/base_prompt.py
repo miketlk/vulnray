@@ -20,7 +20,8 @@ Output format (plain text, exactly these keys):
 #why: one short sentence
 
 Rules:
-- Output one most probable CWE only when judge=yes.
+- When judge=yes, output one or more vulnerability types in #type.
+  If reporting multiple, separate entries with commas (for example: CWE-120, CWE-22).
 - If judge=no, set type=N/A.
 - Keep #why concise and evidence-grounded.
 - If a Contract Summary is present in context, treat it as high-priority evidence.

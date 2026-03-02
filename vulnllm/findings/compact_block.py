@@ -163,15 +163,19 @@ def compact_decision_to_payload(decision: CompactDecision) -> dict:
             "vulnerabilities": [],
         }
 
-    vuln_type = decision.vuln_type
-    if vuln_type.upper() == "N/A":
-        vuln_type = "Potential Vulnerability"
-    cwe = vuln_type.upper() if vuln_type.upper().startswith("CWE-") else ""
-    return {
-        "need_context_symbols": decision.need_context_symbols,
-        "vulnerabilities": [
+    raw_types = [t.strip() for t in re.split(r"[;,]", decision.vuln_type) if t.strip()]
+    if not raw_types:
+        raw_types = [decision.vuln_type.strip()]
+
+    vulns: list[dict[str, object]] = []
+    for vuln_type in raw_types:
+        normalized_type = vuln_type or "Potential Vulnerability"
+        if normalized_type.upper() == "N/A":
+            normalized_type = "Potential Vulnerability"
+        cwe = normalized_type.upper() if normalized_type.upper().startswith("CWE-") else ""
+        vulns.append(
             {
-                "vulnerability_type": vuln_type,
+                "vulnerability_type": normalized_type,
                 "severity": "medium",
                 "confidence": confidence,
                 "description": decision.why,
@@ -179,5 +183,9 @@ def compact_decision_to_payload(decision: CompactDecision) -> dict:
                 "recommendation": "Manually review and confirm exploitability.",
                 "references": [cwe] if cwe else [],
             }
-        ],
+        )
+
+    return {
+        "need_context_symbols": decision.need_context_symbols,
+        "vulnerabilities": vulns,
     }

@@ -346,7 +346,7 @@ def _augment_with_heuristic_findings(
     chunk: CodeChunk,
     next_id: int,
 ) -> tuple[list[Finding], int]:
-    fallback_findings, fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
+    fallback_findings, _fallback_next_id = _heuristic_fallback_findings(chunk, next_id)
     if not fallback_findings:
         return parsed_findings, next_id
     existing_types = {f.vulnerability_type.upper() for f in parsed_findings}
@@ -358,12 +358,13 @@ def _augment_with_heuristic_findings(
             continue
         if has_memory_overflow and vuln_type in memory_overflow_family:
             continue
+        finding.id = f"F-{next_id:04d}"
         parsed_findings.append(finding)
         existing_types.add(vuln_type)
         if vuln_type in memory_overflow_family:
             has_memory_overflow = True
-        next_id = max(next_id, int(finding.id.split("-")[1]) + 1)
-    return parsed_findings, max(next_id, fallback_next_id)
+        next_id += 1
+    return parsed_findings, next_id
 
 
 def _collect_outputs(cfg) -> dict[str, Path]:
@@ -814,6 +815,7 @@ def run() -> int:
                     continue
                 if cfg.scan.max_findings > 0 and emitted_count >= cfg.scan.max_findings:
                     continue
+                finding.id = f"F-{emitted_count + 1:04d}"
                 emitted_seen.add(emitted_key)
                 emitted_count += 1
                 if "json" in outputs:

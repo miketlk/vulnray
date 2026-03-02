@@ -101,8 +101,8 @@ def extract_decision_metadata(raw: str) -> tuple[list[str], list[str]]:
     if decision is None:
         return [], []
 
-    vuln_type = decision.vuln_type.strip()
-    cwes = [vuln_type.upper()] if vuln_type.upper().startswith("CWE-") else []
+    vuln_types = [t.strip() for t in re.split(r"[;,]", decision.vuln_type) if t.strip()]
+    cwes = [v.upper() for v in vuln_types if v.upper().startswith("CWE-")]
     symbols = [str(x).strip() for x in decision.need_context_symbols if str(x).strip()]
     return cwes, symbols
 

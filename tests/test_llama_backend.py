@@ -121,6 +121,24 @@ def test_parse_findings_accepts_compact_yes():
     assert findings[0].confidence == 0.9
 
 
+def test_parse_findings_accepts_multiple_types_in_compact_yes():
+    raw = """
+#judge: yes
+#type: CWE-787, CWE-22
+#confidence: high
+#need_context: N/A
+#why: multiple distinct issues found
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 2
+    assert findings[0].vulnerability_type == "CWE-787"
+    assert findings[1].vulnerability_type == "CWE-22"
+    assert findings[0].id == "F-0001"
+    assert findings[1].id == "F-0002"
+
+
 def test_parse_findings_accepts_compact_no():
     raw = """
 #judge: no
@@ -157,6 +175,19 @@ def test_extract_decision_metadata_parses_compact_output():
 """
     cwes, symbols = extract_decision_metadata(raw)
     assert cwes == ["CWE-120"]
+    assert symbols == ["User", "create_user"]
+
+
+def test_extract_decision_metadata_parses_multiple_cwes():
+    raw = """
+#judge: yes
+#type: CWE-120, CWE-22
+#confidence: high
+#need_context: User, create_user
+#why: two findings
+"""
+    cwes, symbols = extract_decision_metadata(raw)
+    assert cwes == ["CWE-120", "CWE-22"]
     assert symbols == ["User", "create_user"]
 
 

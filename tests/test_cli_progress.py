@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
 
-from vulnllm.cli import run
+from vulnllm.chunking.function_chunker import CodeChunk
+from vulnllm.cli import _augment_with_heuristic_findings, run
+from vulnllm.findings.model import Finding
 from vulnllm.inference.llama_backend import InferenceResult
 
 
@@ -666,6 +669,98 @@ def test_scan_uses_heuristic_fallback_for_unparsable_unsafe_sink(monkeypatch, tm
     assert rc == 1
     assert "CWE-787" in report
     assert "CWE-22" in report
+
+
+def test_heuristic_augmentation_assigns_sequential_ids_for_appended_findings():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=8,
+        function="write_user_file",
+        text=(
+            "void write_user_file(const char *relative_path) {\n"
+            "    char path[64];\n"
+            "    strcpy(path, relative_path);\n"
+            '    sprintf(path, "%s/%s", "./data", relative_path);\n'
+            '    FILE *fp = fopen(path, "w");\n'
+            "    if (fp) fclose(fp);\n"
+            "}\n"
+        ),
+    )
+    parsed_findings = [
+        Finding(
+            id="F-0001",
+            file=chunk.file,
+            start_line=chunk.start_line,
+            end_line=chunk.end_line,
+            function=chunk.function,
+            vulnerability_type="CWE-120",
+            severity="high",
+            confidence=0.9,
+            description="d",
+            reasoning="r",
+            references=["CWE-120"],
+        )
+    ]
+
+    augmented, next_id = _augment_with_heuristic_findings(parsed_findings, chunk, next_id=2)
+
+    assert [f.id for f in augmented] == ["F-0001", "F-0002"]
+    assert [f.vulnerability_type for f in augmented] == ["CWE-120", "CWE-22"]
+    assert next_id == 3
+
+
+def test_report_ids_are_sequential_for_emitted_findings(monkeypatch, tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "int maybe_overflow(int a, int b) {\n"
+        "    return a + b;\n"
+        "}\n"
+        "\n"
+        "void write_user_file(const char *relative_path) {\n"
+        "    FILE *fp = fopen(relative_path, \"w\");\n"
+        "    if (fp) fclose(fp);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    out_dir = tmp_path / "reports"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, prompt, _params):
+            if "maybe_overflow" in prompt:
+                return InferenceResult(text=_compact_yes("CWE-190"), error=None)
+            if "write_user_file" in prompt:
+                return InferenceResult(text=_compact_yes("CWE-22"), error=None)
+            return InferenceResult(text=_compact_no(), error=None)
+
+    monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulnray",
+            str(tmp_path),
+            "--lang",
+            "c",
+            "--model",
+            str(model),
+            "--out-dir",
+            str(out_dir),
+            "--overwrite",
+        ],
+    )
+
+    rc = run()
+    payload = json.loads((out_dir / "scan.json").read_text(encoding="utf-8"))
+    ids = [finding["id"] for finding in payload["findings"]]
+
+    assert rc == 1
+    assert ids == ["F-0001"]
 
 
 def test_scan_accepts_compact_output_wrapped_in_fence(monkeypatch, tmp_path: Path, caplog):
