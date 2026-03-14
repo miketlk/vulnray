@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import shlex
 import sys
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from vulnllm.chunking.function_chunker import CodeChunk
@@ -33,6 +35,7 @@ from vulnllm.prompt.base_prompt import build_prompt
 from vulnllm.reporting.csv_report import append_csv_finding, init_csv_report
 from vulnllm.reporting.json_report import append_json_finding, append_json_summary, init_json_report
 from vulnllm.reporting.markdown_report import append_markdown_finding, append_markdown_summary_and_table, init_markdown_report
+from vulnllm.reporting.sarif_report import write_sarif_report
 from vulnllm.utils.progress import maybe_progress
 
 log = logging.getLogger("vulnllm")
@@ -40,6 +43,7 @@ __all__ = ["run_scan"]
 
 
 def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
+    start_time_utc = datetime.now(timezone.utc)
     index = None
     if cfg.project.index == "basic" and files:
         index = build_project_index(files, root)
@@ -371,6 +375,22 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
         append_json_summary(outputs["json"], findings)
     if "md" in outputs:
         append_markdown_summary_and_table(outputs["md"], cfg, findings)
+    if "sarif" in outputs:
+        end_time_utc = datetime.now(timezone.utc)
+        write_sarif_report(
+            outputs["sarif"],
+            cfg,
+            str(root.resolve()),
+            len(files),
+            len(all_chunks),
+            findings,
+            include_reasoning=cfg.output_cfg.include_reasoning,
+            command_line=shlex.join(sys.argv),
+            start_time_utc=start_time_utc,
+            end_time_utc=end_time_utc,
+            execution_successful=True,
+            failed_chunks=failed_chunks,
+        )
 
     total_processing_time_sec = max(0.0, time.perf_counter() - processing_started)
     print_processing_stats(

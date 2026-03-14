@@ -136,3 +136,24 @@ def test_config_rejects_negative_inference_retries():
     args = parser.parse_args([".", "--model", "./model.gguf", "--retries", "-1"])
     with pytest.raises(ValueError, match="inference.retries must be >= 0"):
         resolve_config(args)
+
+
+def test_config_accepts_sarif_output_format():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--output", "sarif"])
+    cfg = resolve_config(args)
+    assert cfg.output_cfg.formats == ["sarif"]
+
+
+def test_config_accepts_mixed_json_and_sarif_output_formats():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--output", "json,sarif"])
+    cfg = resolve_config(args)
+    assert cfg.output_cfg.formats == ["json", "sarif"]
+
+
+def test_config_rejects_invalid_output_format():
+    parser = build_parser()
+    args = parser.parse_args([".", "--model", "./model.gguf", "--output", "json,yaml"])
+    with pytest.raises(ValueError, match="Unsupported output format: yaml"):
+        resolve_config(args)

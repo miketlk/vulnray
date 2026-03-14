@@ -187,6 +187,10 @@ def test_output_helpers_and_processing_stats(tmp_path: Path, capsys):
     assert outputs["json"].name == "scan.json"
     assert prompt_output_log_path(cfg) == Path(cfg.logging.prompt_output_md)
 
+    cfg.output_cfg.formats = ["sarif"]
+    sarif_outputs = collect_outputs(cfg)
+    assert sarif_outputs["sarif"].name == "scan.sarif"
+
     log_path = tmp_path / "prompt-log.md"
     log_path.write_text("# log\n", encoding="utf-8")
     chunk = CodeChunk(file="main.c", start_line=1, end_line=2, function="add", text="int add(void){return 1;}")

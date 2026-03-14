@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run one LLM inference benchmark prompt and exit (ignores scan path)",
     )
 
-    p.add_argument("--output", help="Comma-separated: json,csv,md")
+    p.add_argument("--output", help="Comma-separated: json,csv,md,sarif")
     p.add_argument("--out-dir")
     p.add_argument("--out-prefix")
     p.add_argument("--overwrite", action="store_true")
@@ -390,7 +390,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
     for fmt in cfg.output_cfg.formats:
         if fmt == "markdown":
             continue
-        if fmt not in {"json", "csv", "md"}:
+        if fmt not in {"json", "csv", "md", "sarif"}:
             raise ValueError(f"Unsupported output format: {fmt}")
     cfg.output_cfg.formats = ["md" if f == "markdown" else f for f in cfg.output_cfg.formats]
 

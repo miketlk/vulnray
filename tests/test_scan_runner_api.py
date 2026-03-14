@@ -83,3 +83,68 @@ def test_run_scan_returns_one_and_writes_finding(tmp_path: Path):
     payload = json.loads((tmp_path / "reports" / "scan.json").read_text(encoding="utf-8"))
     assert payload["summary"]["total_findings"] == 1
     assert payload["findings"][0]["vulnerability_type"] == "CWE-190"
+
+
+def test_run_scan_writes_sarif_output(tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text("int mul(int a, int b) { return a * b; }\n", encoding="utf-8")
+    cfg = _cfg(tmp_path)
+    cfg.output_cfg.formats = ["sarif"]
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(text=_compact_yes("CWE-190"), error=None)
+
+    rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
+    assert rc == 1
+    sarif_path = tmp_path / "reports" / "scan.sarif"
+    payload = json.loads(sarif_path.read_text(encoding="utf-8"))
+    assert payload["version"] == "2.1.0"
+    assert len(payload["runs"][0]["results"]) == 1
+
+
+def test_run_scan_mixed_json_and_sarif_outputs(tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text("int mul(int a, int b) { return a * b; }\n", encoding="utf-8")
+    cfg = _cfg(tmp_path)
+    cfg.output_cfg.formats = ["json", "sarif"]
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(text=_compact_yes("CWE-190"), error=None)
+
+    rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
+    assert rc == 1
+    json_path = tmp_path / "reports" / "scan.json"
+    sarif_path = tmp_path / "reports" / "scan.sarif"
+    assert json_path.exists()
+    assert sarif_path.exists()
+
+
+def test_sarif_uses_final_deduplicated_and_truncated_findings(tmp_path: Path):
+    src1 = tmp_path / "a.c"
+    src2 = tmp_path / "b.c"
+    src1.write_text("int mul1(int a, int b) { return a * b; }\n", encoding="utf-8")
+    src2.write_text("int mul2(int a, int b) { return a * b; }\n", encoding="utf-8")
+    cfg = _cfg(tmp_path)
+    cfg.output_cfg.formats = ["sarif"]
+    cfg.scan.max_findings = 1
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, _prompt, _params):
+            return InferenceResult(text=_compact_yes("CWE-190"), error=None)
+
+    rc = run_scan(cfg, root=tmp_path, files=[src1, src2], backend_factory=FakeBackend)
+    assert rc == 1
+    sarif_path = tmp_path / "reports" / "scan.sarif"
+    payload = json.loads(sarif_path.read_text(encoding="utf-8"))
+    assert len(payload["runs"][0]["results"]) == 1
