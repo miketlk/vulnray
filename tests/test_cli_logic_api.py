@@ -123,6 +123,26 @@ def test_build_chunks_file_strategy_and_index_context(tmp_path: Path):
     assert "Known symbol locations" in index_context(FakeIndex(), fn_chunk)
 
 
+def test_build_chunks_uses_ast_strategy_for_c_family(tmp_path: Path):
+    root = tmp_path
+    src = tmp_path / "main.c"
+    src.write_text(
+        "int copy_name(char *dst, const char *src, size_t len) {\n"
+        "  char local[16];\n"
+        "  VERIFY_CHECK(len <= 16);\n"
+        "  memcpy(local, src, len);\n"
+        "  return (int)local[0];\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    ast_chunks = build_chunks(src, root, "ast", 128, 16)
+    function_chunks = build_chunks(src, root, "function", 128, 16)
+
+    assert len(ast_chunks) == 1
+    assert any("fixed-size write" in line for line in ast_chunks[0].preprocessing_facts)
+    assert function_chunks[0].preprocessing_facts == ast_chunks[0].preprocessing_facts
+
+
 def test_finding_normalization_and_gates():
     chunk = CodeChunk(
         file="main.c",

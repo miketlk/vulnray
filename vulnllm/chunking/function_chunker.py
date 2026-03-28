@@ -16,6 +16,7 @@ class CodeChunk:
     end_line: int
     text: str
     function: str | None = None
+    preprocessing_facts: tuple[str, ...] = ()
 
 
 

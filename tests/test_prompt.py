@@ -119,3 +119,37 @@ def test_build_prompt_uses_compact_single_pass_contract_by_default():
     assert "#judge: yes|no" in prompt
     assert "#type: CWE-xx|N/A" in prompt
     assert "BEGIN_FINDINGS_JSON" not in prompt
+
+
+def test_build_prompt_places_preprocessing_facts_before_target_function():
+    cfg = Config(path=".")
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="copy_name",
+        text="int copy_name(void) { return 0; }\n",
+        preprocessing_facts=("- fixed-size write: memcpy to local with bound len, local extent=16",),
+    )
+    prompt = build_prompt(cfg, chunk, index_context="Nearest declaration:\n- api.h:1 int copy_name(void);")
+
+    assert "Deterministic facts:" in prompt
+    assert prompt.index("Deterministic facts:") < prompt.rindex("// target function")
+
+
+def test_build_prompt_deduplicates_identical_context_lines():
+    cfg = Config(path=".")
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="copy_name",
+        text="int copy_name(void) { return 0; }\n",
+        preprocessing_facts=("- integer type: int (signed)",),
+    )
+    prompt = build_prompt(
+        cfg,
+        chunk,
+        index_context="Deterministic facts:\n- integer type: int (signed)\nNearest declaration:\n- api.h:1 int copy_name(void);",
+    )
+    assert prompt.count("integer type: int (signed)") == 1

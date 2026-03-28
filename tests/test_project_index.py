@@ -38,6 +38,8 @@ def test_project_index_builds_contract_aware_context_packet(tmp_path: Path):
     assert "Direct callees:" in packet
     assert "Assertion facts:" in packet
     assert "Local size/range facts:" in packet
+    assert "Deterministic facts:" in packet
+    assert "- - " not in packet
     assert "Contract Summary:" in packet
     assert "Macro snippets:" in packet
     assert "Call path context" in packet

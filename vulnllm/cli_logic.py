@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from vulnllm.chunking.ast_chunker import chunk_file_by_ast, supports_ast_chunking
 from vulnllm.chunking.function_chunker import CodeChunk, chunk_file_by_function
 from vulnllm.chunking.sliding_chunker import chunk_file_sliding
 from vulnllm.findings.model import Finding
@@ -139,6 +140,10 @@ def build_chunks(path: Path, root: Path, strategy: str, chunk_tokens: int, overl
         rel = str(path.relative_to(root if root.is_dir() else root.parent))
         lines = text.splitlines()
         return [CodeChunk(file=rel, start_line=1, end_line=max(1, len(lines)), text=text, function=None)]
+    if strategy == "ast":
+        return chunk_file_by_ast(path, root)
+    if strategy == "function" and supports_ast_chunking(path):
+        return chunk_file_by_ast(path, root)
     return chunk_file_by_function(path, root)
 
 

@@ -37,7 +37,7 @@ class FilesConfig:
 
 @dataclass
 class ChunkingConfig:
-    strategy: str = "function"
+    strategy: str = "ast"
     chunk_tokens: int = 1400
     overlap: int = 200
 
@@ -153,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--context", type=int)
     p.add_argument("--context-max", type=int)
-    p.add_argument("--chunk-strategy", choices=["function", "sliding", "file"])
+    p.add_argument("--chunk-strategy", choices=["ast", "function", "sliding", "file"])
     p.add_argument("--chunk-tokens", type=int)
     p.add_argument("--chunk-overlap", type=int)
     p.add_argument("--project-index", choices=["off", "basic"])

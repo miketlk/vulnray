@@ -152,6 +152,18 @@ def test_config_accepts_mixed_json_and_sarif_output_formats():
     assert cfg.output_cfg.formats == ["json", "sarif"]
 
 
+def test_config_defaults_to_ast_chunk_strategy_and_accepts_cli_override():
+    parser = build_parser()
+
+    args_default = parser.parse_args([".", "--model", "./model.gguf"])
+    cfg_default = resolve_config(args_default)
+    assert cfg_default.chunking.strategy == "ast"
+
+    args = parser.parse_args([".", "--model", "./model.gguf", "--chunk-strategy", "function"])
+    cfg = resolve_config(args)
+    assert cfg.chunking.strategy == "function"
+
+
 def test_config_rejects_invalid_output_format():
     parser = build_parser()
     args = parser.parse_args([".", "--model", "./model.gguf", "--output", "json,yaml"])

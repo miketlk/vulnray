@@ -20,3 +20,16 @@ def test_discover_files_filters(tmp_path: Path):
     names = [str(p.relative_to(tmp_path)).replace("\\", "/") for p in found]
 
     assert names == ["src/a.c"]
+
+
+def test_discover_files_supports_cpp_language_alias(tmp_path: Path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
+    (tmp_path / "src" / "b.c").write_text("int x(){return 1;}\n", encoding="utf-8")
+
+    scan = ScanConfig(languages=["c++"])
+    files = FilesConfig(include=["src/**/*"], exclude=[], max_file_bytes=1024)
+    found = discover_files(str(tmp_path), scan, files)
+    names = [str(p.relative_to(tmp_path)).replace("\\", "/") for p in found]
+
+    assert names == ["src/a.cpp"]

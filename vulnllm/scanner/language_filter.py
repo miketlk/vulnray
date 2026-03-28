@@ -2,6 +2,8 @@ from __future__ import annotations
 
 LANG_EXTENSIONS = {
     "c": {".c", ".h"},
+    "cpp": {".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"},
+    "c++": {".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"},
 }
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from vulnllm.chunking.function_chunker import chunk_file_by_function
 from vulnllm.indexing.call_graph import CallGraph, FunctionSignature, IndexedFunction, build_call_graph, normalize_type, split_args
 from vulnllm.indexing.symbol_table import SymbolTable
+from vulnllm.preprocessing.c_family import ast_parse_c_family, build_facts_lines
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s+["<]([^">]+)[">]')
 CALL_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
@@ -53,6 +54,7 @@ class ProjectIndex:
     assertion_map: dict[str, list[str]] = field(default_factory=dict)
     range_facts: dict[str, list[str]] = field(default_factory=dict)
     macro_snippets: dict[str, list[str]] = field(default_factory=dict)
+    deterministic_facts: dict[str, list[str]] = field(default_factory=dict)
     call_paths: dict[str, list[list[str]]] = field(default_factory=dict)
     entry_points: list[str] = field(default_factory=list)
     target_functions: set[str] = field(default_factory=set)
@@ -106,6 +108,12 @@ class ProjectIndex:
             packet_lines.append("Local size/range facts:")
             for fact in local_ranges[:6]:
                 packet_lines.append(f"- {fact}")
+
+        deterministic = self.deterministic_facts.get(function_name, [])
+        if deterministic:
+            packet_lines.append("Deterministic facts:")
+            for fact in deterministic[:8]:
+                packet_lines.append(f"- {fact.lstrip('- ').strip()}")
 
         contract_summary = self._build_contract_summary(function_name)
         if contract_summary:
@@ -260,6 +268,10 @@ def build_project_index(files: list[Path], root: Path) -> ProjectIndex:
 
             idx.assertion_map.setdefault(chunk.function, []).extend(_extract_assertion_facts(chunk.text))
             idx.range_facts.setdefault(chunk.function, []).extend(_extract_range_facts(chunk.text))
+            parsed = ast_parse_c_family(chunk.text)
+            facts = [fact.lstrip("- ").strip() for fact in build_facts_lines(parsed.facts)]
+            if facts:
+                idx.deterministic_facts.setdefault(chunk.function, []).extend(facts)
 
             indexed_functions.append(
                 IndexedFunction(

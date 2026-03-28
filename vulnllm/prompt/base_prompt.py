@@ -150,7 +150,22 @@ def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
     if focus:
         parts.append(focus)
     parts.append("Chunk metadata: " + metadata)
-    context_text = _as_comment_block(index_context.strip() or "N/A")
+    context_sections: list[str] = []
+    if chunk.preprocessing_facts:
+        context_sections.append("Deterministic facts:")
+        context_sections.extend(chunk.preprocessing_facts)
+    if index_context.strip():
+        context_sections.append(index_context.strip())
+    context_lines = [line for section in context_sections for line in section.splitlines()]
+    deduped_lines: list[str] = []
+    seen_lines: set[str] = set()
+    for line in context_lines:
+        key = line.strip()
+        if key in seen_lines:
+            continue
+        seen_lines.add(key)
+        deduped_lines.append(line)
+    context_text = _as_comment_block("\n".join(deduped_lines).strip() or "N/A")
     code_snippet = "\n".join(["// context", context_text, "// target function", _strip_c_comments(chunk.text)])
     parts.append("Code snippet:\n```c\n" + code_snippet + "\n```")
     return "\n\n".join(p for p in parts if p)
