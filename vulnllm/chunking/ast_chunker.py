@@ -32,6 +32,8 @@ def chunk_file_by_ast(path: Path, root: Path) -> list[CodeChunk]:
                 text=chunk.text,
                 function=chunk.function,
                 preprocessing_facts=fact_lines,
+                preprocessing_backend=parsed.backend,
+                boundary_confidence=chunk.boundary_confidence,
             )
         )
     return enriched

@@ -11,6 +11,7 @@ from pathlib import Path
 from vulnllm.chunking.function_chunker import CodeChunk
 from vulnllm.cli_logic import (
     append_exchange_header,
+    append_ast_chunker_section,
     append_inference_metadata_section,
     append_output_section,
     append_prompt_section,
@@ -168,6 +169,7 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
                         context_events=result.context_events if result is not None else None,
                         seed=used_seed,
                     )
+                    append_ast_chunker_section(prompt_output_path, chunk=chunk)
                 if cfg.logging.log_prompts:
                     append_prompt_section(prompt_output_path, prompt)
                 if cfg.logging.log_model_outputs:
@@ -262,6 +264,7 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
                                 context_events=retry_result.context_events,
                                 seed=retry_seed,
                             )
+                            append_ast_chunker_section(prompt_output_path, chunk=chunk)
                         if cfg.logging.log_prompts:
                             append_prompt_section(prompt_output_path, prompt)
                         if cfg.logging.log_model_outputs:

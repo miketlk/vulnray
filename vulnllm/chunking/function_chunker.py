@@ -17,6 +17,8 @@ class CodeChunk:
     text: str
     function: str | None = None
     preprocessing_facts: tuple[str, ...] = ()
+    preprocessing_backend: str | None = None
+    boundary_confidence: str = "unknown"
 
 
 
@@ -54,6 +56,7 @@ def chunk_file_by_function(path: Path, root: Path) -> list[CodeChunk]:
                 end_line=end,
                 text=text,
                 function=func_name,
+                boundary_confidence="high",
             )
         )
         i = j + 1

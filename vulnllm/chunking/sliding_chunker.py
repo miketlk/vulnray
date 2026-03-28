@@ -31,6 +31,7 @@ def chunk_file_sliding(path: Path, root: Path, chunk_tokens: int, overlap: int) 
                 end_line=j,
                 text="\n".join(lines[i:j]),
                 function=None,
+                boundary_confidence="low",
             )
         )
         if j >= n:

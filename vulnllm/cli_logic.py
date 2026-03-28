@@ -31,6 +31,7 @@ __all__ = [
     "append_exchange_header",
     "append_prompt_section",
     "append_inference_metadata_section",
+    "append_ast_chunker_section",
     "append_output_section",
     "fenced_text_block",
     "print_processing_stats",
@@ -139,7 +140,16 @@ def build_chunks(path: Path, root: Path, strategy: str, chunk_tokens: int, overl
         text = path.read_text(encoding="utf-8", errors="ignore")
         rel = str(path.relative_to(root if root.is_dir() else root.parent))
         lines = text.splitlines()
-        return [CodeChunk(file=rel, start_line=1, end_line=max(1, len(lines)), text=text, function=None)]
+        return [
+            CodeChunk(
+                file=rel,
+                start_line=1,
+                end_line=max(1, len(lines)),
+                text=text,
+                function=None,
+                boundary_confidence="low",
+            )
+        ]
     if strategy == "ast":
         return chunk_file_by_ast(path, root)
     if strategy == "function" and supports_ast_chunking(path):
@@ -442,6 +452,46 @@ def append_inference_metadata_section(
     else:
         lines.append("- Context events: none")
     lines.append("")
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+
+
+def _deterministic_fact_counts(chunk: CodeChunk) -> dict[str, int]:
+    counts = {
+        "fixed-size write": 0,
+        "array extent": 0,
+        "integer type": 0,
+        "assertion-proven range": 0,
+    }
+    for line in chunk.preprocessing_facts:
+        normalized = line.strip()
+        if normalized.startswith("- "):
+            normalized = normalized[2:]
+        for kind in counts:
+            prefix = f"{kind}:"
+            if normalized.startswith(prefix):
+                counts[kind] += 1
+                break
+    return counts
+
+
+def append_ast_chunker_section(path: Path, *, chunk: CodeChunk) -> None:
+    counts = _deterministic_fact_counts(chunk)
+    lines = [
+        "### AST chunker",
+        "",
+        f"- Preprocessing backend: `{chunk.preprocessing_backend or 'n/a'}`",
+        f"- Deterministic facts total: `{len(chunk.preprocessing_facts)}`",
+        (
+            "- Deterministic facts by type: "
+            f"`fixed-size write={counts['fixed-size write']}, "
+            f"array extent={counts['array extent']}, "
+            f"integer type={counts['integer type']}, "
+            f"assertion-proven range={counts['assertion-proven range']}`"
+        ),
+        f"- Boundary confidence: `{chunk.boundary_confidence}`",
+        "",
+    ]
     with path.open("a", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
 

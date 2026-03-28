@@ -146,6 +146,11 @@ def test_prompt_output_log_writes_separated_exchanges(monkeypatch, tmp_path: Pat
     assert "- Seed: `0`" in text
     assert "context increase: 8192 -> 12288" in text
     assert "context decrease: 12288 -> 8192" in text
+    assert "### AST chunker" in text
+    assert "- Preprocessing backend: `" in text
+    assert "- Deterministic facts total: `" in text
+    assert "- Deterministic facts by type: `" in text
+    assert "- Boundary confidence: `" in text
     assert "### Model Output" in text
     assert text.index("### Inference Metadata") < text.index("### Prompt")
 
