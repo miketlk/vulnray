@@ -53,9 +53,8 @@ def test_embedded_fixture_mocked_detection_pipeline():
             return InferenceResult(
                 text=(
                     "#judge: yes\n"
-                    "#type: Improper Length Validation\n"
+                    "#type: CWE-120\n"
                     "#confidence: high\n"
-                    "#need_context: N/A\n"
                     "#why: Length field copied into fixed-size stack buffer."
                 )
             )
@@ -63,9 +62,8 @@ def test_embedded_fixture_mocked_detection_pipeline():
             return InferenceResult(
                 text=(
                     "#judge: yes\n"
-                    "#type: Double Free\n"
+                    "#type: CWE-415\n"
                     "#confidence: high\n"
-                    "#need_context: N/A\n"
                     "#why: session token may be freed twice."
                 )
             )
@@ -73,9 +71,8 @@ def test_embedded_fixture_mocked_detection_pipeline():
             return InferenceResult(
                 text=(
                     "#judge: yes\n"
-                    "#type: Use After Free\n"
+                    "#type: CWE-416\n"
                     "#confidence: high\n"
-                    "#need_context: N/A\n"
                     "#why: Freed buffer is accessed."
                 )
             )
@@ -83,9 +80,8 @@ def test_embedded_fixture_mocked_detection_pipeline():
             return InferenceResult(
                 text=(
                     "#judge: yes\n"
-                    "#type: Integer Overflow\n"
+                    "#type: CWE-190\n"
                     "#confidence: high\n"
-                    "#need_context: N/A\n"
                     "#why: Multiplication may overflow 16-bit accumulator."
                 )
             )
@@ -93,14 +89,13 @@ def test_embedded_fixture_mocked_detection_pipeline():
             return InferenceResult(
                 text=(
                     "#judge: yes\n"
-                    "#type: Key Material Exposure\n"
+                    "#type: CWE-200\n"
                     "#confidence: medium\n"
-                    "#need_context: N/A\n"
                     "#why: Secret key is copied into debug log buffer."
                 )
             )
         return InferenceResult(
-            text="#judge: no\n#type: N/A\n#confidence: high\n#need_context: N/A\n#why: no vulnerability found"
+            text="#judge: no\n#type: N/A\n#confidence: high\n#why: no vulnerability found"
         )
 
     backend.generate = fake_generate  # type: ignore[assignment]
@@ -114,8 +109,8 @@ def test_embedded_fixture_mocked_detection_pipeline():
         all_findings.extend(findings)
 
     vuln_types = {f.vulnerability_type for f in all_findings}
-    assert "Improper Length Validation" in vuln_types
-    assert "Double Free" in vuln_types
-    assert "Use After Free" in vuln_types
-    assert "Integer Overflow" in vuln_types
-    assert "Key Material Exposure" in vuln_types
+    assert "CWE-120" in vuln_types
+    assert "CWE-415" in vuln_types
+    assert "CWE-416" in vuln_types
+    assert "CWE-190" in vuln_types
+    assert "CWE-200" in vuln_types

@@ -19,16 +19,16 @@ from vulnllm.cli_logic import (
     approx_tokens,
     augment_with_heuristic_findings,
     build_chunks,
+    build_deterministic_context_bundle,
     candidate_cwe_policy_for_chunk,
     collect_outputs,
-    index_context,
     normalize_exploitability_classification,
     print_processing_stats,
     prompt_output_log_path,
     secondary_cwe_candidates_for_chunk,
 )
 from vulnllm.findings.deduplicator import deduplicate_findings
-from vulnllm.findings.model import Finding, parse_findings_with_error, parse_sufficiency_decision
+from vulnllm.findings.model import Finding, parse_findings_with_error
 from vulnllm.inference.multipass import run_scan_multipass
 from vulnllm.inference.parameters import mode_params
 from vulnllm.indexing.project_index import build_project_index
@@ -83,8 +83,11 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
     successful_chunks = 0
     failed_chunks = 0
     unresolved_chunks = 0
-    retrieval_rounds_used = 0
-    parse_failures = 0
+    context_expansions_used = 0
+    symbols_added_to_context = 0
+    types_added_to_context = 0
+    caller_summaries_added = 0
+    detection_parse_failures = 0
     suppressed_by_caller_bounds = 0
     suppressed_by_struct_extent = 0
     suppressed_by_contradiction = 0
@@ -112,8 +115,11 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
         nonlocal successful_chunks
         nonlocal failed_chunks
         nonlocal unresolved_chunks
-        nonlocal retrieval_rounds_used
-        nonlocal parse_failures
+        nonlocal context_expansions_used
+        nonlocal symbols_added_to_context
+        nonlocal types_added_to_context
+        nonlocal caller_summaries_added
+        nonlocal detection_parse_failures
         nonlocal suppressed_by_caller_bounds
         nonlocal suppressed_by_struct_extent
         nonlocal suppressed_by_contradiction
@@ -128,12 +134,15 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
             else:
                 pass1_progress += 1
                 maybe_progress(progress_enabled, pass1_progress, total_chunks, f"{chunk.file} (pass1)")
-            base_index_context = index_context(index, chunk)
+            context_bundle = build_deterministic_context_bundle(index, chunk)
             allowed_cwe_policy = candidate_cwe_policy_for_chunk(chunk)
             base_params = mode_params(cfg, deep=deep)
-            context_text = base_index_context
-            retrieved_symbols: list[str] = []
-            sufficiency_result = "unknown"
+            context_text = context_bundle.text
+            retrieved_symbols = list(context_bundle.retrieved_symbols)
+            context_expansions_used += context_bundle.context_expansions_used
+            symbols_added_to_context += context_bundle.symbols_added_to_context
+            types_added_to_context += context_bundle.types_added_to_context
+            caller_summaries_added += context_bundle.caller_summaries_added
             parsed_findings: list[Finding] | None = None
             next_id2: int | None = None
 
@@ -197,8 +206,8 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
                 return result
 
             def _retry_once(prompt: str, *, stage: str, parse_error: str):
-                nonlocal parse_failures
-                parse_failures += 1
+                nonlocal detection_parse_failures
+                detection_parse_failures += 1
                 retry_seed = int(base_params.seed) + 1
                 msg = (
                     "Malformed model output; retrying once with different seed "
@@ -210,121 +219,46 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
                 retry_params = replace(base_params, seed=retry_seed)
                 return _run_exchange(prompt, stage=f"{stage}-retry", params=retry_params)
 
-            sufficiency_prompt = build_prompt(
+            detection_prompt = build_prompt(
                 cfg,
                 chunk,
                 index_context=context_text,
                 allowed_cwe_policy=allowed_cwe_policy,
-                prompt_kind="sufficiency",
+                prompt_kind="detection",
             )
-            sufficiency_exchange = _run_exchange(
-                sufficiency_prompt,
-                stage="sufficiency",
-                extra_events=[f"initial_context_lines={len([line for line in context_text.splitlines() if line.strip()])}"],
+            detection_exchange = _run_exchange(
+                detection_prompt,
+                stage="detection",
+                extra_events=[
+                    f"initial_context_lines={len([line for line in context_text.splitlines() if line.strip()])}",
+                    f"context_expansions_used={context_bundle.context_expansions_used}",
+                    f"symbols_added_to_context={context_bundle.symbols_added_to_context}",
+                    f"types_added_to_context={context_bundle.types_added_to_context}",
+                    f"caller_summaries_added={context_bundle.caller_summaries_added}",
+                ],
             )
-            if sufficiency_exchange is None or sufficiency_exchange.error:
+            if detection_exchange is None or detection_exchange.error:
                 failed_chunks += 1
                 return []
 
-            sufficiency_decision = parse_sufficiency_decision(sufficiency_exchange.text)
-            if sufficiency_decision is None:
-                legacy_findings, _legacy_next_id, legacy_parse_error = parse_findings_with_error(
-                    sufficiency_exchange.text,
-                    chunk,
-                    start_id=next_id,
-                )
-                if legacy_parse_error is None:
-                    sufficiency_result = "yes"
-                    parsed_findings = legacy_findings
-                    next_id2 = _legacy_next_id
-                else:
-                    retry_result = _retry_once(
-                        sufficiency_prompt,
-                        stage="sufficiency",
-                        parse_error="No valid sufficiency output block found",
-                    )
-                    if retry_result is None or retry_result.error:
-                        unresolved_chunks += 1
-                        return []
-                    sufficiency_decision = parse_sufficiency_decision(retry_result.text)
-                    if sufficiency_decision is None:
-                        unresolved_chunks += 1
-                        return []
-            else:
-                parsed_findings = None
-                next_id2 = None
-
-            if sufficiency_decision is not None:
-                sufficiency_result = "yes" if sufficiency_decision.context_is_sufficient else "no"
-            if sufficiency_decision is not None and not sufficiency_decision.context_is_sufficient:
-                if index is None:
+            parsed_findings, next_id2, parse_error = parse_findings_with_error(
+                detection_exchange.text,
+                chunk,
+                start_id=next_id,
+            )
+            if parse_error:
+                retry_result = _retry_once(detection_prompt, stage="detection", parse_error=parse_error)
+                if retry_result is None or retry_result.error:
                     unresolved_chunks += 1
                     return []
-                retrieval_context, retrieved_symbols = _build_retrieval_context(index, sufficiency_decision.requested_symbols, base_index_context)
-                if not retrieval_context or not retrieved_symbols:
-                    unresolved_chunks += 1
-                    return []
-                retrieval_rounds_used += 1
-                context_text = retrieval_context
-                sufficiency_prompt = build_prompt(
-                    cfg,
-                    chunk,
-                    index_context=context_text,
-                    allowed_cwe_policy=allowed_cwe_policy,
-                    prompt_kind="sufficiency",
-                )
-                sufficiency_exchange = _run_exchange(
-                    sufficiency_prompt,
-                    stage="sufficiency-retrieval",
-                    extra_events=[f"retrieved_symbols={','.join(retrieved_symbols)}"],
-                )
-                if sufficiency_exchange is None or sufficiency_exchange.error:
-                    failed_chunks += 1
-                    return []
-                sufficiency_decision = parse_sufficiency_decision(sufficiency_exchange.text)
-                if sufficiency_decision is None or not sufficiency_decision.context_is_sufficient:
-                    unresolved_chunks += 1
-                    return []
-                sufficiency_result = "yes"
-
-            if parsed_findings is None or next_id2 is None:
-                detection_prompt = build_prompt(
-                    cfg,
-                    chunk,
-                    index_context=context_text,
-                    allowed_cwe_policy=allowed_cwe_policy,
-                    prompt_kind="detection",
-                )
-                detection_exchange = _run_exchange(
-                    detection_prompt,
-                    stage="detection",
-                    extra_events=[
-                        f"sufficiency_result={sufficiency_result}",
-                        f"retrieved_symbols={','.join(retrieved_symbols) if retrieved_symbols else 'N/A'}",
-                    ],
-                )
-                if detection_exchange is None or detection_exchange.error:
-                    failed_chunks += 1
-                    return []
-
                 parsed_findings, next_id2, parse_error = parse_findings_with_error(
-                    detection_exchange.text,
+                    retry_result.text,
                     chunk,
                     start_id=next_id,
                 )
                 if parse_error:
-                    retry_result = _retry_once(detection_prompt, stage="detection", parse_error=parse_error)
-                    if retry_result is None or retry_result.error:
-                        unresolved_chunks += 1
-                        return []
-                    parsed_findings, next_id2, parse_error = parse_findings_with_error(
-                        retry_result.text,
-                        chunk,
-                        start_id=next_id,
-                    )
-                    if parse_error:
-                        unresolved_chunks += 1
-                        return []
+                    unresolved_chunks += 1
+                    return []
 
             parsed_findings = normalize_exploitability_classification(parsed_findings)
             parsed_findings, suppression_counts = apply_compact_acceptance_gates(
@@ -351,9 +285,9 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
                         followup_prompt,
                         stage=f"detection-followup-{extra_cwe.lower()}",
                         extra_events=[
-                            f"sufficiency_result={sufficiency_result}",
                             f"retrieved_symbols={','.join(retrieved_symbols) if retrieved_symbols else 'N/A'}",
                             f"followup_policy={extra_cwe}",
+                            f"symbols_added_to_context={context_bundle.symbols_added_to_context}",
                         ],
                     )
                     if followup_exchange is None or followup_exchange.error:
@@ -398,8 +332,10 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
                 with prompt_output_path.open("a", encoding="utf-8") as out:
                     out.write(
                         "\n### Controller Summary\n\n"
-                        f"- Sufficiency result: `{sufficiency_result}`\n"
                         f"- Retrieved symbols: `{', '.join(retrieved_symbols) if retrieved_symbols else 'N/A'}`\n"
+                        f"- Context expansions used: `{context_bundle.context_expansions_used}`\n"
+                        f"- Types added to context: `{context_bundle.types_added_to_context}`\n"
+                        f"- Caller summaries added: `{context_bundle.caller_summaries_added}`\n"
                         f"- Suppression reason: `"
                         f"{_format_suppression_reason(suppression_counts)}`\n"
                         f"- Final detection result: `"
@@ -459,8 +395,11 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
             findings,
             telemetry={
                 "unresolved_chunks": unresolved_chunks,
-                "retrieval_rounds_used": retrieval_rounds_used,
-                "parse_failures": parse_failures,
+                "context_expansions_used": context_expansions_used,
+                "symbols_added_to_context": symbols_added_to_context,
+                "types_added_to_context": types_added_to_context,
+                "caller_summaries_added": caller_summaries_added,
+                "detection_parse_failures": detection_parse_failures,
                 "suppressed_by_caller_bounds": suppressed_by_caller_bounds,
                 "suppressed_by_struct_extent": suppressed_by_struct_extent,
                 "suppressed_by_contradiction": suppressed_by_contradiction,
@@ -473,8 +412,11 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
             findings,
             telemetry={
                 "unresolved_chunks": unresolved_chunks,
-                "retrieval_rounds_used": retrieval_rounds_used,
-                "parse_failures": parse_failures,
+                "context_expansions_used": context_expansions_used,
+                "symbols_added_to_context": symbols_added_to_context,
+                "types_added_to_context": types_added_to_context,
+                "caller_summaries_added": caller_summaries_added,
+                "detection_parse_failures": detection_parse_failures,
                 "suppressed_by_caller_bounds": suppressed_by_caller_bounds,
                 "suppressed_by_struct_extent": suppressed_by_struct_extent,
                 "suppressed_by_contradiction": suppressed_by_contradiction,
@@ -506,8 +448,11 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
         exchange_count=exchange_count,
         total_processing_time_sec=total_processing_time_sec,
         unresolved_chunks=unresolved_chunks,
-        retrieval_rounds_used=retrieval_rounds_used,
-        parse_failures=parse_failures,
+        context_expansions_used=context_expansions_used,
+        symbols_added_to_context=symbols_added_to_context,
+        types_added_to_context=types_added_to_context,
+        caller_summaries_added=caller_summaries_added,
+        detection_parse_failures=detection_parse_failures,
         suppressed_by_caller_bounds=suppressed_by_caller_bounds,
         suppressed_by_struct_extent=suppressed_by_struct_extent,
         suppressed_by_contradiction=suppressed_by_contradiction,
@@ -519,27 +464,3 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
 def _format_suppression_reason(counts: dict[str, int]) -> str:
     reasons = [name for name, value in counts.items() if value > 0]
     return ",".join(reasons) if reasons else "none"
-
-
-def _build_retrieval_context(index, symbols: list[str], base_index_context: str) -> tuple[str, list[str]]:
-    lines: list[str] = [base_index_context.strip()] if base_index_context.strip() else []
-    retrieval_lines: list[str] = []
-    resolved_symbols: list[str] = []
-    for symbol in symbols[:2]:
-        name = symbol.strip()
-        if not name:
-            continue
-        snippet = index.get_symbol_definition(name, max_lines=16)
-        if snippet:
-            retrieval_lines.append(f"- {snippet.replace(chr(10), chr(10) + '  ')}")
-            resolved_symbols.append(name)
-            continue
-        refs = index.query_symbol(name)
-        if refs:
-            locations = ", ".join(f"{file}:{line}" for file, line in refs[:3])
-            retrieval_lines.append(f"- {name}: {locations}")
-            resolved_symbols.append(name)
-    if retrieval_lines:
-        lines.append("Retrieved symbols:")
-        lines.extend(retrieval_lines)
-    return "\n".join(lines).strip(), resolved_symbols

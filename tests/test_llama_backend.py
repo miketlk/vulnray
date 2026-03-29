@@ -505,7 +505,7 @@ def test_llama_backend_stops_early_after_complete_sane_formatted_block(tmp_path:
     )
 
     assert result.error is None
-    assert result.text.endswith("#why: real finding")
+    assert result.text == "#judge: yes\n#type: CWE-787"
     assert "TRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED" not in result.text
     assert len(yielded_tokens) < len(streamed_text)
 

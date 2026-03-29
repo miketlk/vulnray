@@ -629,7 +629,7 @@ def test_scan_retries_unparsable_output_with_different_seed(monkeypatch, tmp_pat
     rc = run()
 
     assert rc == 1
-    assert seen_seeds == [7, 8, 7]
+    assert seen_seeds == [7, 8]
     assert "Malformed model output; retrying once with different seed" in caplog.text
 
 
@@ -790,8 +790,6 @@ def test_scan_accepts_compact_output_wrapped_in_fence(monkeypatch, tmp_path: Pat
 
         def generate(self, prompt, params):
             seen_seeds.append(params.seed)
-            if "#function: N/A|symbol_a,symbol_b" in prompt:
-                return InferenceResult(text="```text\n#judge: yes\n#function: N/A\n```", error=None)
             return InferenceResult(text="```text\n#judge: yes\n#type: CWE-190\n#confidence: high\n#need_context: N/A\n#why: d\n```", error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
@@ -817,7 +815,7 @@ def test_scan_accepts_compact_output_wrapped_in_fence(monkeypatch, tmp_path: Pat
     rc = run()
 
     assert rc == 1
-    assert seen_seeds == [11, 11]
+    assert seen_seeds == [11]
     assert "Malformed model output" not in caplog.text
 
 

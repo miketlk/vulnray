@@ -28,6 +28,7 @@ class CompactDetectionDecision:
     confidence_label: str
     why: str
     block: str
+    end_offset: int
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,7 @@ def _parse_detection_segment(
         confidence_label=(confidence_m.group(1).strip().lower() if confidence_m else "medium"),
         why=why,
         block=segment[judge_m.start() : end_idx].strip(),
+        end_offset=segment_start + end_idx,
     )
 
 
@@ -235,16 +237,16 @@ def _extract_last_sufficiency_decision(
 
 
 def extract_complete_sane_detection_block(raw: str) -> str | None:
-    decision = _extract_last_detection_decision(raw, require_complete_why_line=True)
+    decision = _extract_last_detection_decision(raw, require_complete_why_line=False)
     if decision is None:
         return None
     vuln_types = [item.strip() for item in re.split(r"[;,]", decision.vuln_type) if item.strip()]
     if decision.judge == "yes":
-        if not vuln_types or not all(re.fullmatch(r"CWE-\d+", item, flags=re.IGNORECASE) for item in vuln_types):
+        if not vuln_types or not all(re.fullmatch(r"CWE-\d{2,}", item, flags=re.IGNORECASE) for item in vuln_types):
             return None
     elif decision.vuln_type.strip().upper() != "N/A":
         return None
-    if "#why:" not in decision.block and decision.judge == "yes":
+    if decision.end_offset >= len(raw) or raw[decision.end_offset] not in {"\n", "\r"}:
         return None
     return decision.block
 

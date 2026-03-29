@@ -15,12 +15,10 @@ Input sections are separated by:
 Output format (plain text, exactly these keys):
 #judge: yes|no
 #type: CWE-xx|N/A
-#why: one short sentence
 
 Rules:
 - If judge=yes, #type must contain only CWE values from Allowed CWE policy.
 - If judge=no, set #type: N/A.
-- Keep #why short and evidence-grounded.
 - Do not guess based only on hypothetical caller misuse.
 - Use sink-matched CWE mapping:
   - strcpy/strcat/gets into fixed buffer -> CWE-120

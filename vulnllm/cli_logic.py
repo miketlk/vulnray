@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,8 @@ __all__ = [
     "run_llm_inference_test",
     "build_chunks",
     "index_context",
+    "DeterministicContextBundle",
+    "build_deterministic_context_bundle",
     "candidate_cwe_policy_for_chunk",
     "secondary_cwe_candidates_for_chunk",
     "normalize_exploitability_classification",
@@ -39,6 +42,19 @@ __all__ = [
     "fenced_text_block",
     "print_processing_stats",
 ]
+
+
+@dataclass(frozen=True)
+class DeterministicContextBundle:
+    text: str
+    retrieved_symbols: tuple[str, ...] = ()
+    types_added_to_context: int = 0
+    caller_summaries_added: int = 0
+    context_expansions_used: int = 0
+
+    @property
+    def symbols_added_to_context(self) -> int:
+        return len(self.retrieved_symbols)
 
 
 def approx_tokens(text: str, *, allow_zero: bool = False) -> int:
@@ -79,7 +95,7 @@ def run_llm_inference_test(cfg, *, backend_factory) -> int:
     prompt = (
         "You are an advanced vulnerability detection model.\n"
         "Analyze the target function and output only this format:\n"
-        "#judge: yes|no\n#type: CWE-xx|N/A\n#why: one short sentence\n"
+        "#judge: yes|no\n#type: CWE-xx|N/A\n"
         "```c\n"
         "// context\n"
         "// Allowed CWE policy: CWE-120, CWE-787, N/A\n"
@@ -170,6 +186,163 @@ def index_context(index: ProjectIndex | None, chunk: CodeChunk) -> str:
     if not refs:
         return ""
     return "Known symbol locations:\n" + "\n".join(f"- {f}:{line}" for f, line in refs[:5])
+
+
+def build_deterministic_context_bundle(
+    index: ProjectIndex | None,
+    chunk: CodeChunk,
+    *,
+    max_symbol_bodies: int = 6,
+    max_type_defs: int = 3,
+    max_closure_layers: int = 2,
+    max_caller_blocks: int = 1,
+) -> DeterministicContextBundle:
+    base_context = index_context(index, chunk)
+    if index is None or not chunk.function:
+        return DeterministicContextBundle(text=base_context)
+
+    selected_symbols: list[str] = []
+    selected_types: list[str] = []
+    sections: list[str] = [base_context] if base_context.strip() else []
+    seen_symbols: set[str] = {chunk.function}
+    current_layer = list(index.callees.get(chunk.function, []))
+    layers_used = 0
+
+    for _layer in range(max_closure_layers):
+        ranked = [name for name in current_layer if name not in seen_symbols]
+        if not ranked or len(selected_symbols) >= max_symbol_bodies:
+            break
+        ranked.sort(key=lambda name: _symbol_priority(index, name), reverse=True)
+
+        next_layer: list[str] = []
+        added_this_layer = False
+        for name in ranked:
+            if len(selected_symbols) >= max_symbol_bodies:
+                break
+            snippet = index.get_function_definition(name, max_lines=14)
+            if not snippet:
+                continue
+            selected_symbols.append(name)
+            seen_symbols.add(name)
+            added_this_layer = True
+            next_layer.extend(index.callees.get(name, []))
+        if not added_this_layer:
+            break
+        layers_used += 1
+        current_layer = next_layer
+
+    if not selected_symbols and len(selected_symbols) < max_symbol_bodies:
+        sibling_candidates = _collect_caller_adjacent_symbols(index, chunk.function)
+        for name in sibling_candidates:
+            if len(selected_symbols) >= max_symbol_bodies:
+                break
+            if name in seen_symbols:
+                continue
+            snippet = index.get_function_definition(name, max_lines=14)
+            if not snippet:
+                continue
+            selected_symbols.append(name)
+            seen_symbols.add(name)
+        if sibling_candidates and selected_symbols:
+            layers_used = max(layers_used, 1)
+
+    if selected_symbols:
+        sections.append("Retrieved symbol bodies:")
+        for name in selected_symbols:
+            snippet = index.get_function_definition(name, max_lines=14)
+            if not snippet:
+                continue
+            sections.append(f"- {snippet.replace(chr(10), chr(10) + '  ')}")
+
+    type_candidates = _collect_referenced_type_names(index, [chunk.text, *(index.get_function_definition(name, max_lines=24) for name in selected_symbols)])
+    for name in type_candidates[:max_type_defs]:
+        snippet = index.get_symbol_definition(name, max_lines=18)
+        if not snippet:
+            continue
+        selected_types.append(name)
+    if selected_types:
+        sections.append("Referenced type definitions:")
+        for name in selected_types:
+            snippet = index.get_symbol_definition(name, max_lines=18)
+            if not snippet:
+                continue
+            sections.append(f"- {snippet.replace(chr(10), chr(10) + '  ')}")
+
+    caller_blocks_added = 0
+    if max_caller_blocks > 0:
+        caller_body = _build_relevant_caller_block(index, chunk.function)
+        if caller_body:
+            sections.append("Relevant caller context:")
+            sections.append(caller_body)
+            caller_blocks_added = 1
+
+    final_text = "\n".join(section for section in sections if section.strip()).strip()
+    return DeterministicContextBundle(
+        text=final_text,
+        retrieved_symbols=tuple(selected_symbols),
+        types_added_to_context=len(selected_types),
+        caller_summaries_added=caller_blocks_added,
+        context_expansions_used=layers_used,
+    )
+
+
+def _symbol_priority(index: ProjectIndex, name: str) -> tuple[int, int, str]:
+    snippet = index.get_function_definition(name, max_lines=24).lower()
+    score = 0
+    if any(token in snippet for token in ("strcpy(", "strcat(", "sprintf(", "memcpy(", "memmove(", "gets(", "fopen(", "open(")):
+        score += 5
+    if re.search(r"\breturn\b", snippet) and any(op in snippet for op in ("*", "+", "-", "<<", ">>")):
+        score += 4
+    if "if (" in snippet or "assert(" in snippet or "arg_check" in snippet or "verify_check" in snippet:
+        score += 3
+    return score, -len(snippet), name
+
+
+def _collect_referenced_type_names(index: ProjectIndex, texts: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in index.type_definitions:
+        pattern = re.compile(rf"\b{re.escape(name)}\b")
+        if any(pattern.search(text) for text in texts if text):
+            if name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _build_relevant_caller_block(index: ProjectIndex, function_name: str) -> str:
+    callers = index.callers.get(function_name, [])
+    if not callers:
+        return ""
+    caller = callers[0]
+    snippet = index.get_function_definition(caller, max_lines=14)
+    if not snippet:
+        return ""
+    return f"- {snippet.replace(chr(10), chr(10) + '  ')}"
+
+
+def _collect_caller_adjacent_symbols(index: ProjectIndex, function_name: str) -> list[str]:
+    callers = index.callers.get(function_name, [])
+    if not callers:
+        return []
+    caller_defs = index.definitions.get(callers[0], [])
+    if not caller_defs:
+        return []
+    source = caller_defs[0].source
+    names = re.findall(r"\b([A-Za-z_]\w*)\s*\(", source)
+    ignored = {"if", "for", "while", "switch", "return", function_name}
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in ignored or name in seen:
+            continue
+        if name not in index.definitions:
+            continue
+        seen.add(name)
+        candidates.append(name)
+    candidates.sort(key=lambda name: _symbol_priority(index, name), reverse=True)
+    return candidates[:2]
 
 
 def candidate_cwe_policy_for_chunk(chunk: CodeChunk) -> tuple[str, ...]:
@@ -402,7 +575,11 @@ def _has_visible_integer_violation(chunk: CodeChunk) -> bool:
 
 def _visible_contradiction_proves_safe(chunk: CodeChunk, context_text: str) -> bool:
     combined = "\n".join(chunk.preprocessing_facts) + "\n" + context_text
-    return "branch contradiction:" in combined.lower() or "assertion-proven range:" in combined.lower()
+    return (
+        "branch contradiction:" in combined.lower()
+        or "assertion-proven range:" in combined.lower()
+        or _caller_assignment_proves_integer_safe(chunk, context_text)
+    )
 
 
 def _struct_extent_proves_visible_access_safe(chunk: CodeChunk, context_text: str) -> bool:
@@ -429,6 +606,54 @@ def _struct_extent_proves_visible_access_safe(chunk: CodeChunk, context_text: st
         if max_index >= 0 and max_index < extent:
             return True
     return False
+
+
+def _caller_assignment_proves_integer_safe(chunk: CodeChunk, context_text: str) -> bool:
+    if not re.search(r"\breturn\s+[A-Za-z_]\w*\s*\*\s*[A-Za-z_]\w*\s*;", chunk.text):
+        return False
+    if not chunk.function:
+        return False
+
+    call_m = re.search(
+        rf"\b{re.escape(chunk.function)}\s*\(\s*([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*,\s*(\d+)\s*\)",
+        context_text,
+    )
+    if call_m is None:
+        return False
+
+    object_name, field_name, rhs_value = call_m.group(1), call_m.group(2), int(call_m.group(3))
+    assignment_m = re.search(
+        rf"\b([A-Za-z_]\w*)\s*\(\s*&{re.escape(object_name)}\s*,[^)]*,\s*(\d+)\s*\)",
+        context_text,
+    )
+    if assignment_m is None:
+        return False
+
+    helper_name = assignment_m.group(1)
+    lhs_value = int(assignment_m.group(2))
+    helper_header_m = re.search(
+        rf"\b{re.escape(helper_name)}\s*\(([^)]*)\)\s*\{{",
+        context_text,
+        flags=re.DOTALL,
+    )
+    if helper_header_m is None:
+        return False
+
+    params = [part.strip() for part in helper_header_m.group(1).split(",") if part.strip()]
+    matched_param = None
+    for param in params:
+        name_m = re.search(r"([A-Za-z_]\w*)\s*$", param)
+        if not name_m:
+            continue
+        param_name = name_m.group(1)
+        if re.search(rf"->\s*{re.escape(field_name)}\s*=\s*{re.escape(param_name)}\s*;", context_text):
+            matched_param = param_name
+            break
+    if matched_param is None:
+        return False
+
+    product = lhs_value * rhs_value
+    return 0 <= product <= 2_147_483_647
 
 
 def normalize_cwe_and_apply_local_evidence_gate(
@@ -752,8 +977,11 @@ def print_processing_stats(
     exchange_count: int,
     total_processing_time_sec: float,
     unresolved_chunks: int = 0,
-    retrieval_rounds_used: int = 0,
-    parse_failures: int = 0,
+    context_expansions_used: int = 0,
+    symbols_added_to_context: int = 0,
+    types_added_to_context: int = 0,
+    caller_summaries_added: int = 0,
+    detection_parse_failures: int = 0,
     suppressed_by_caller_bounds: int = 0,
     suppressed_by_struct_extent: int = 0,
     suppressed_by_contradiction: int = 0,
@@ -770,8 +998,11 @@ def print_processing_stats(
     print(f"successfully_processed_chunks_functions: {successful_chunks}")
     print(f"failed_chunks_functions: {failed_chunks}")
     print(f"unresolved_chunks: {unresolved_chunks}")
-    print(f"retrieval_rounds_used: {retrieval_rounds_used}")
-    print(f"parse_failures: {parse_failures}")
+    print(f"context_expansions_used: {context_expansions_used}")
+    print(f"symbols_added_to_context: {symbols_added_to_context}")
+    print(f"types_added_to_context: {types_added_to_context}")
+    print(f"caller_summaries_added: {caller_summaries_added}")
+    print(f"detection_parse_failures: {detection_parse_failures}")
     print(f"suppressed_by_caller_bounds: {suppressed_by_caller_bounds}")
     print(f"suppressed_by_struct_extent: {suppressed_by_struct_extent}")
     print(f"suppressed_by_contradiction: {suppressed_by_contradiction}")

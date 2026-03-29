@@ -150,6 +150,8 @@ def parse_findings_with_error(raw: str, chunk: CodeChunk, start_id: int = 1) -> 
     raw_types = [t.strip() for t in re.split(r"[;,]", decision.vuln_type) if t.strip()]
     if not raw_types:
         return [], start_id, "No valid CWE values in detection output"
+    if not all(re.fullmatch(r"CWE-\d{2,}", item, flags=re.IGNORECASE) for item in raw_types):
+        return [], start_id, "Detection output contained malformed CWE values"
 
     confidence = {"low": 0.5, "medium": 0.7, "high": 0.9}.get(decision.confidence_label, 0.7)
     legacy_context_sufficient = "unknown"
