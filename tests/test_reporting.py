@@ -157,6 +157,52 @@ def test_incremental_json_can_append_after_finalize(tmp_path: Path):
     assert data["summary"]["total_findings"] == 2
 
 
+def test_markdown_omits_duplicate_reasoning_section(tmp_path: Path):
+    cfg = Config()
+    cfg.inference.model = local_model_path()
+    finding = Finding(
+        id="F-0001",
+        file="src/a.c",
+        start_line=10,
+        end_line=20,
+        function="foo",
+        vulnerability_type="Buffer Overflow",
+        severity="high",
+        confidence=0.9,
+        description="Unchecked length can overflow destination.",
+        reasoning=" unchecked   length can overflow destination. ",
+    )
+
+    md_path = tmp_path / "scan.md"
+    write_markdown_report(md_path, cfg, [finding], include_reasoning=True)
+
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "Reasoning:" not in md_text
+
+
+def test_markdown_keeps_reasoning_when_it_differs_from_description(tmp_path: Path):
+    cfg = Config()
+    cfg.inference.model = local_model_path()
+    finding = Finding(
+        id="F-0001",
+        file="src/a.c",
+        start_line=10,
+        end_line=20,
+        function="foo",
+        vulnerability_type="Buffer Overflow",
+        severity="high",
+        confidence=0.9,
+        description="Unchecked length can overflow destination.",
+        reasoning="memcpy without bounds check",
+    )
+
+    md_path = tmp_path / "scan.md"
+    write_markdown_report(md_path, cfg, [finding], include_reasoning=True)
+
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "Reasoning:\n\nmemcpy without bounds check" in md_text
+
+
 def _base_finding() -> Finding:
     return Finding(
         id="F-0001",

@@ -90,6 +90,37 @@ def _normalize_exploitability(value: object) -> str:
     return "theoretical"
 
 
+def _normalize_text_space(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def _build_description(*, vulnerability_type: str, reasoning: str, trigger_path: str) -> str:
+    vuln_upper = (vulnerability_type or "").upper()
+    reason = _normalize_text_space(reasoning)
+    trigger = _normalize_text_space(trigger_path).lower()
+    lowered = reason.lower()
+
+    if vuln_upper == "CWE-120":
+        if "strcpy" in trigger or "strcpy" in lowered:
+            return "Unbounded strcpy into a fixed-size destination may overflow."
+        if "strcat" in trigger or "strcat" in lowered:
+            return "Unbounded strcat into a fixed-size destination may overflow."
+        return "Unbounded copy into a fixed-size destination may overflow."
+    if vuln_upper == "CWE-787":
+        if "sprintf" in trigger or "sprintf" in lowered:
+            return "sprintf into a fixed-size buffer may write out of bounds."
+        return "Out-of-bounds write into a fixed-size buffer is possible."
+    if vuln_upper == "CWE-22":
+        if "fopen" in trigger or "fopen" in lowered:
+            return "Unvalidated relative path reaches filesystem access."
+        return "Unvalidated relative path may enable path traversal."
+    if vuln_upper == "CWE-190":
+        if "*" in trigger or "multiplication" in lowered or " * " in lowered:
+            return "Unchecked integer multiplication may overflow."
+        return "Unchecked integer arithmetic may overflow."
+    return reason
+
+
 def extract_complete_sane_formatted_output_block(raw: str) -> str | None:
     return extract_complete_sane_detection_block(raw)
 
@@ -157,6 +188,11 @@ def parse_findings_with_error(raw: str, chunk: CodeChunk, start_id: int = 1) -> 
     next_id = start_id
     for vuln_type in raw_types:
         normalized_type = vuln_type.upper() if vuln_type.upper().startswith("CWE-") else vuln_type
+        description = _build_description(
+            vulnerability_type=normalized_type,
+            reasoning=decision.why,
+            trigger_path=trigger_path,
+        )
         findings.append(
             Finding(
                 id=f"F-{next_id:04d}",
@@ -167,7 +203,7 @@ def parse_findings_with_error(raw: str, chunk: CodeChunk, start_id: int = 1) -> 
                 vulnerability_type=normalized_type,
                 severity=normalize_severity("medium"),
                 confidence=confidence,
-                description=decision.why,
+                description=description,
                 reasoning=decision.why,
                 references=[normalized_type] if normalized_type.upper().startswith("CWE-") else [],
                 recommendation="Manually review and confirm exploitability.",

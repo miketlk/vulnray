@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 _JUDGE_RE = re.compile(r"(?im)^\s*#judge:\s*(yes|no)\s*$")
 _TYPE_RE = re.compile(r"(?im)^\s*#type:\s*([^\n\r]+)\s*$")
-_WHY_RE = re.compile(r"(?im)^\s*#why:\s*([^\n\r]+)\s*$")
+_WHY_RE = re.compile(r"(?im)^\s*#why:\s*([^\n\r]*)\s*$")
 _FUNCTION_RE = re.compile(r"(?im)^\s*#function:\s*([^\n\r]+)\s*$")
 _CONFIDENCE_RE = re.compile(r"(?im)^\s*#confidence:\s*(low|medium|high)\s*$")
 _LEGACY_CONTEXT_SUFFICIENT_RE = re.compile(r"(?im)^\s*#context_sufficient:\s*(yes|no)\s*$")
@@ -18,6 +18,7 @@ _LEGACY_CONTRACT_RE = re.compile(r"(?im)^\s*#contract_breach_evidence:\s*([^\n\r
 
 _VALID_WHERE = {"assertion", "caller_check", "none", "unknown"}
 _VALID_BOOLISH = {"yes", "no", "n/a"}
+_EMBEDDED_STRUCTURED_KEY_RE = re.compile(r"(?:^|\s+)#(?:judge|type|function|why)\s*:", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,21 @@ def _split_requested_symbols(raw_value: str) -> list[str]:
     return [item.strip() for item in trimmed.split(",") if item.strip()]
 
 
+def _normalize_why_text(raw_value: str) -> str:
+    value = raw_value.strip()
+    embedded = _EMBEDDED_STRUCTURED_KEY_RE.search(value)
+    if embedded is not None:
+        value = value[: embedded.start()].rstrip()
+    for fence in ("```", "~~~"):
+        marker = value.find(fence)
+        if marker >= 0:
+            value = value[:marker].rstrip()
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.rstrip(" \t\r\n`|")
+    value = re.sub(r"[;,:.\-]+\s*$", "", value).strip()
+    return value
+
+
 def _validate_legacy_fields(segment: str) -> bool:
     where_m = _LEGACY_WHERE_RE.search(segment)
     if where_m and where_m.group(1).strip().lower() not in _VALID_WHERE:
@@ -101,7 +117,7 @@ def _parse_detection_segment(
     confidence_m = _CONFIDENCE_RE.search(segment)
     why_m = _WHY_RE.search(segment)
     end_idx = why_m.end() if why_m is not None else type_m.end()
-    why = why_m.group(1).strip() if why_m is not None else ""
+    why = _normalize_why_text(why_m.group(1)) if why_m is not None else ""
     if why_m is not None and not why:
         return None
     if require_complete_why_line and why_m is not None and why_m.end() >= len(segment):

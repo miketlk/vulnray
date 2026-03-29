@@ -107,7 +107,8 @@ def test_parse_findings_accepts_compact_yes():
     assert len(findings) == 1
     assert findings[0].vulnerability_type == "CWE-787"
     assert "CWE-787" in findings[0].references
-    assert findings[0].description == "unchecked copy may overflow destination"
+    assert findings[0].description == "Out-of-bounds write into a fixed-size buffer is possible."
+    assert findings[0].reasoning == "unchecked copy may overflow destination"
     assert findings[0].confidence == 0.9
 
 
@@ -181,6 +182,49 @@ def test_parse_findings_accepts_compact_block_without_confidence():
     assert len(findings) == 1
     assert findings[0].vulnerability_type == "CWE-190"
     assert findings[0].confidence == 0.7
+    assert findings[0].description == "Unchecked integer multiplication may overflow."
+    assert findings[0].reasoning == "unchecked multiplication path"
+
+
+def test_parse_findings_sanitizes_embedded_structured_keys_in_why():
+    raw = """
+#judge: yes
+#type: CWE-120
+#why: strcpy used to copy user-controlled data into fixed buffer #judge: yes
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].reasoning == "strcpy used to copy user-controlled data into fixed buffer"
+    assert "#judge:" not in findings[0].reasoning
+    assert findings[0].description == "Unbounded strcpy into a fixed-size destination may overflow."
+
+
+def test_parse_findings_sanitizes_type_and_function_markers_in_why():
+    raw = """
+#judge: yes
+#type: CWE-22
+#why: path reaches fopen without validation #type: CWE-22 #function: helper
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].reasoning == "path reaches fopen without validation"
+    assert findings[0].description == "Unvalidated relative path reaches filesystem access."
+
+
+def test_parse_findings_rejects_positive_when_why_is_empty_after_sanitization():
+    raw = """
+#judge: yes
+#type: CWE-190
+#why: #judge: yes
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert findings == []
 
 
 def test_parse_findings_accepts_early_negative_without_why_when_no_context_requested():

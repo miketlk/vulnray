@@ -43,6 +43,10 @@ def _report_intro_lines(live: bool) -> list[str]:
     ]
 
 
+def _normalized_report_text(value: str) -> str:
+    return " ".join((value or "").split()).strip().lower()
+
+
 def _detailed_finding_lines(path: Path, root: Path, f: Finding, include_reasoning: bool) -> list[str]:
     abs_path = _resolve_file_path(root, f.file)
     file_link = _markdown_link(f.file, _markdown_file_link(path, abs_path, f.start_line))
@@ -64,7 +68,12 @@ def _detailed_finding_lines(path: Path, root: Path, f: Finding, include_reasonin
         f.description or "(none)",
         "",
     ]
-    if include_reasoning:
+    show_reasoning = (
+        include_reasoning
+        and bool((f.reasoning or "").strip())
+        and _normalized_report_text(f.reasoning) != _normalized_report_text(f.description)
+    )
+    if show_reasoning:
         lines.extend(["Reasoning:", "", f.reasoning or "(none)", ""])
     if f.references:
         lines.extend(["References:", "", ", ".join(f.references), ""])
