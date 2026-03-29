@@ -73,8 +73,13 @@ def _detailed_finding_lines(path: Path, root: Path, f: Finding, include_reasonin
     return lines
 
 
-def _summary_and_table_lines(path: Path, cfg: Config, findings: list[Finding]) -> list[str]:
-    summary = build_summary(findings)
+def _summary_and_table_lines(
+    path: Path,
+    cfg: Config,
+    findings: list[Finding],
+    telemetry: dict[str, int] | None = None,
+) -> list[str]:
+    summary = build_summary(findings, telemetry=telemetry)
     root = Path(cfg.path).resolve()
     lines: list[str] = [
         "## Executive Summary",
@@ -86,15 +91,31 @@ def _summary_and_table_lines(path: Path, cfg: Config, findings: list[Finding]) -
         f"- Medium: {summary['by_severity']['medium']}",
         f"- Low: {summary['by_severity']['low']}",
         "",
-        "## Findings Table",
-        "",
-        "| ID | File | Lines | Function | Type | Severity | Confidence |",
-        "|---|---|---:|---|---|---|---:|",
     ]
+    if telemetry:
+        lines.extend(
+            [
+                "Telemetry:",
+                "",
+                f"- Unresolved chunks: {telemetry.get('unresolved_chunks', 0)}",
+                f"- Retrieval rounds used: {telemetry.get('retrieval_rounds_used', 0)}",
+                f"- Parse failures: {telemetry.get('parse_failures', 0)}",
+                f"- Suppressed by caller bounds: {telemetry.get('suppressed_by_caller_bounds', 0)}",
+                f"- Suppressed by struct extent: {telemetry.get('suppressed_by_struct_extent', 0)}",
+                f"- Suppressed by contradiction: {telemetry.get('suppressed_by_contradiction', 0)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Findings Table",
+            "",
+            "| ID | File | Lines | Function | Type | Severity | Confidence |",
+            "|---|---|---:|---|---|---|---:|",
+        ]
+    )
 
     for f in findings:
-        if f.vulnerability_type == "ParserError":
-            continue
         abs_path = _resolve_file_path(root, f.file)
         id_link = _markdown_link(_nowrap_hyphenated(f.id), f"#{_finding_anchor(f.id)}")
         file_link = _markdown_link(f.file, _markdown_file_link(path, abs_path, f.start_line))
@@ -114,27 +135,35 @@ def init_markdown_report(path: Path, cfg: Config) -> None:
 
 
 def append_markdown_finding(path: Path, cfg: Config, f: Finding, include_reasoning: bool = True) -> None:
-    if f.vulnerability_type == "ParserError":
-        return
     root = Path(cfg.path).resolve()
     lines = _detailed_finding_lines(path, root, f, include_reasoning)
     with path.open("a", encoding="utf-8") as out:
         out.write("\n" + "\n".join(lines).rstrip() + "\n")
 
 
-def append_markdown_summary_and_table(path: Path, cfg: Config, findings: list[Finding]) -> None:
-    lines = _summary_and_table_lines(path, cfg, findings)
+def append_markdown_summary_and_table(
+    path: Path,
+    cfg: Config,
+    findings: list[Finding],
+    *,
+    telemetry: dict[str, int] | None = None,
+) -> None:
+    lines = _summary_and_table_lines(path, cfg, findings, telemetry=telemetry)
     with path.open("a", encoding="utf-8") as out:
         out.write("\n" + "\n".join(lines).rstrip() + "\n")
 
 
-def write_markdown_report(path: Path, cfg: Config, findings: list[Finding], include_reasoning: bool = True) -> None:
+def write_markdown_report(
+    path: Path,
+    cfg: Config,
+    findings: list[Finding],
+    include_reasoning: bool = True,
+    telemetry: dict[str, int] | None = None,
+) -> None:
     root = Path(cfg.path).resolve()
     lines = _report_intro_lines(live=False)
     for f in findings:
-        if f.vulnerability_type == "ParserError":
-            continue
         lines.extend(_detailed_finding_lines(path, root, f, include_reasoning))
-    lines.extend(_summary_and_table_lines(path, cfg, findings))
+    lines.extend(_summary_and_table_lines(path, cfg, findings, telemetry=telemetry))
 
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")

@@ -15,20 +15,19 @@ from vulnllm.cli_logic import (
     append_inference_metadata_section,
     append_output_section,
     append_prompt_section,
-    apply_phase15_acceptance_gates,
+    apply_compact_acceptance_gates,
     approx_tokens,
     augment_with_heuristic_findings,
     build_chunks,
+    candidate_cwe_policy_for_chunk,
     collect_outputs,
-    heuristic_fallback_findings,
     index_context,
-    normalize_cwe_and_apply_local_evidence_gate,
     normalize_exploitability_classification,
     print_processing_stats,
     prompt_output_log_path,
 )
 from vulnllm.findings.deduplicator import deduplicate_findings
-from vulnllm.findings.model import Finding, parse_findings
+from vulnllm.findings.model import Finding, parse_findings_with_error, parse_sufficiency_decision
 from vulnllm.inference.multipass import run_scan_multipass
 from vulnllm.inference.parameters import mode_params
 from vulnllm.indexing.project_index import build_project_index
@@ -82,6 +81,12 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
     pass2_progress = 0
     successful_chunks = 0
     failed_chunks = 0
+    unresolved_chunks = 0
+    retrieval_rounds_used = 0
+    parse_failures = 0
+    suppressed_by_caller_bounds = 0
+    suppressed_by_struct_extent = 0
+    suppressed_by_contradiction = 0
     total_exchange_tokens = 0
     total_exchange_time_sec = 0.0
     exchange_count = 0
@@ -105,6 +110,12 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
         nonlocal prompt_output_entry
         nonlocal successful_chunks
         nonlocal failed_chunks
+        nonlocal unresolved_chunks
+        nonlocal retrieval_rounds_used
+        nonlocal parse_failures
+        nonlocal suppressed_by_caller_bounds
+        nonlocal suppressed_by_struct_extent
+        nonlocal suppressed_by_contradiction
         nonlocal total_exchange_tokens
         nonlocal total_exchange_time_sec
         nonlocal exchange_count
@@ -117,216 +128,226 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
                 pass1_progress += 1
                 maybe_progress(progress_enabled, pass1_progress, total_chunks, f"{chunk.file} (pass1)")
             base_index_context = index_context(index, chunk)
-            prompt = build_prompt(cfg, chunk, index_context=base_index_context)
-            if prompt_output_path is not None:
-                prompt_output_entry += 1
-                if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
-                    append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+            allowed_cwe_policy = candidate_cwe_policy_for_chunk(chunk)
             base_params = mode_params(cfg, deep=deep)
-            used_seed: int | None = base_params.seed
-            result = None
+            context_text = base_index_context
+            retrieved_symbols: list[str] = []
+            sufficiency_result = "unknown"
             parsed_findings: list[Finding] | None = None
             next_id2: int | None = None
 
-            t0 = time.perf_counter()
-            try:
-                result = backend.generate(prompt, base_params)
-            except Exception as e:  # noqa: BLE001
+            def _run_exchange(prompt: str, *, stage: str, params=None, extra_events: list[str] | None = None):
+                nonlocal prompt_output_entry
+                nonlocal total_exchange_tokens
+                nonlocal total_exchange_time_sec
+                nonlocal exchange_count
+                if params is None:
+                    params = base_params
+                if prompt_output_path is not None and (cfg.logging.log_prompts or cfg.logging.log_model_outputs):
+                    prompt_output_entry += 1
+                    append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
+                t0 = time.perf_counter()
+                try:
+                    result = backend.generate(prompt, params)
+                except Exception as e:  # noqa: BLE001
+                    elapsed = max(0.0, time.perf_counter() - t0)
+                    total_exchange_time_sec += elapsed
+                    exchange_count += 1
+                    msg = (
+                        "Skipping function due to exchange exception "
+                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                        f"function={chunk.function or 'N/A'}, stage={stage}): {e}"
+                    )
+                    log.exception(msg)
+                    print(msg, file=sys.stderr)
+                    return None
+
                 elapsed = max(0.0, time.perf_counter() - t0)
                 total_exchange_time_sec += elapsed
                 exchange_count += 1
-                msg = (
-                    "Skipping function due to exchange exception "
-                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                    f"function={chunk.function or 'N/A'}): {e}"
-                )
-                log.exception(msg)
-                print(msg, file=sys.stderr)
-                failed_chunks += 1
-                return []
-
-            elapsed = max(0.0, time.perf_counter() - t0)
-            total_exchange_time_sec += elapsed
-            exchange_count += 1
-
-            if not result.error:
-                prompt_tokens = result.prompt_tokens if result.prompt_tokens is not None else approx_tokens(prompt)
-                completion_tokens = (
-                    result.completion_tokens
-                    if result.completion_tokens is not None
-                    else approx_tokens(result.text, allow_zero=True)
-                )
-                total_tokens = (
-                    result.total_tokens if result.total_tokens is not None else prompt_tokens + completion_tokens
-                )
-                total_exchange_tokens += max(0, int(total_tokens))
-            if prompt_output_path is not None:
-                if cfg.logging.log_model_outputs or cfg.logging.log_prompts:
-                    append_inference_metadata_section(
-                        prompt_output_path,
-                        timestamp_local=result.timestamp_local if result is not None else None,
-                        context_size=(result.context_size if result is not None else None) or cfg.inference.context,
-                        context_events=result.context_events if result is not None else None,
-                        seed=used_seed,
+                if extra_events:
+                    result.context_events.extend(extra_events)
+                result.context_events.append(f"stage={stage}")
+                if not result.error:
+                    prompt_tokens = result.prompt_tokens if result.prompt_tokens is not None else approx_tokens(prompt)
+                    completion_tokens = (
+                        result.completion_tokens
+                        if result.completion_tokens is not None
+                        else approx_tokens(result.text, allow_zero=True)
                     )
-                    append_ast_chunker_section(prompt_output_path, chunk=chunk)
-                if cfg.logging.log_prompts:
-                    append_prompt_section(prompt_output_path, prompt)
-                if cfg.logging.log_model_outputs:
-                    append_output_section(
-                        prompt_output_path,
-                        result.text if result is not None else "",
-                        result.error if result is not None else None,
+                    total_tokens = (
+                        result.total_tokens if result.total_tokens is not None else prompt_tokens + completion_tokens
                     )
-            if result is None:
+                    total_exchange_tokens += max(0, int(total_tokens))
+                if prompt_output_path is not None:
+                    if cfg.logging.log_model_outputs or cfg.logging.log_prompts:
+                        append_inference_metadata_section(
+                            prompt_output_path,
+                            timestamp_local=result.timestamp_local,
+                            context_size=result.context_size or cfg.inference.context,
+                            context_events=result.context_events,
+                            seed=params.seed,
+                        )
+                        append_ast_chunker_section(prompt_output_path, chunk=chunk)
+                    if cfg.logging.log_prompts:
+                        append_prompt_section(prompt_output_path, prompt)
+                    if cfg.logging.log_model_outputs:
+                        append_output_section(prompt_output_path, result.text, result.error)
+                return result
+
+            def _retry_once(prompt: str, *, stage: str, parse_error: str):
+                nonlocal parse_failures
+                parse_failures += 1
+                retry_seed = int(base_params.seed) + 1
                 msg = (
-                    "Skipping function due to missing inference result "
-                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                    f"function={chunk.function or 'N/A'})"
+                    "Malformed model output; retrying once with different seed "
+                    f"(seed={retry_seed}) ({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
+                    f"function={chunk.function or 'N/A'}, stage={stage}): {parse_error}"
                 )
                 log.warning(msg)
                 print(msg, file=sys.stderr)
+                retry_params = replace(base_params, seed=retry_seed)
+                return _run_exchange(prompt, stage=f"{stage}-retry", params=retry_params)
+
+            sufficiency_prompt = build_prompt(
+                cfg,
+                chunk,
+                index_context=context_text,
+                allowed_cwe_policy=allowed_cwe_policy,
+                prompt_kind="sufficiency",
+            )
+            sufficiency_exchange = _run_exchange(
+                sufficiency_prompt,
+                stage="sufficiency",
+                extra_events=[f"initial_context_lines={len([line for line in context_text.splitlines() if line.strip()])}"],
+            )
+            if sufficiency_exchange is None or sufficiency_exchange.error:
                 failed_chunks += 1
                 return []
-            if result.error:
-                msg = (
-                    "Skipping function due to inference error "
-                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                    f"function={chunk.function or 'N/A'}): {result.error}"
+
+            sufficiency_decision = parse_sufficiency_decision(sufficiency_exchange.text)
+            if sufficiency_decision is None:
+                legacy_findings, _legacy_next_id, legacy_parse_error = parse_findings_with_error(
+                    sufficiency_exchange.text,
+                    chunk,
+                    start_id=next_id,
                 )
-                log.warning(msg)
-                print(msg, file=sys.stderr)
-                failed_chunks += 1
-                return []
-            parsed_findings, next_id2 = parse_findings(result.text, chunk, start_id=next_id)
-            parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
-            if parse_errors:
-                max_retries = max(0, int(cfg.inference.retries))
-                base_seed = int(base_params.seed)
-                for retry_attempt in range(1, max_retries + 1):
-                    retry_seed = base_seed + retry_attempt
-                    msg = (
-                        "Unparsable model output; retrying with different seed "
-                        f"(attempt {retry_attempt}/{max_retries}, seed={retry_seed}) "
-                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                        f"function={chunk.function or 'N/A'})"
+                if legacy_parse_error is None:
+                    sufficiency_result = "yes"
+                    parsed_findings = legacy_findings
+                    next_id2 = _legacy_next_id
+                else:
+                    retry_result = _retry_once(
+                        sufficiency_prompt,
+                        stage="sufficiency",
+                        parse_error="No valid sufficiency output block found",
                     )
-                    log.warning(msg)
-                    print(msg, file=sys.stderr)
+                    if retry_result is None or retry_result.error:
+                        unresolved_chunks += 1
+                        return []
+                    sufficiency_decision = parse_sufficiency_decision(retry_result.text)
+                    if sufficiency_decision is None:
+                        unresolved_chunks += 1
+                        return []
+            else:
+                parsed_findings = None
+                next_id2 = None
 
-                    retry_params = replace(base_params, seed=retry_seed)
-                    used_seed = retry_seed
-                    t_retry = time.perf_counter()
-                    try:
-                        retry_result = backend.generate(prompt, retry_params)
-                    except Exception as e:  # noqa: BLE001
-                        elapsed_retry = max(0.0, time.perf_counter() - t_retry)
-                        total_exchange_time_sec += elapsed_retry
-                        exchange_count += 1
-                        msg = (
-                            "Skipping parse-retry attempt due to exchange exception "
-                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                            f"function={chunk.function or 'N/A'}, seed={retry_seed}): {e}"
-                        )
-                        log.exception(msg)
-                        print(msg, file=sys.stderr)
-                        continue
+            if sufficiency_decision is not None:
+                sufficiency_result = "yes" if sufficiency_decision.context_is_sufficient else "no"
+            if sufficiency_decision is not None and not sufficiency_decision.context_is_sufficient:
+                if index is None:
+                    unresolved_chunks += 1
+                    return []
+                retrieval_context, retrieved_symbols = _build_retrieval_context(index, sufficiency_decision.requested_symbols, base_index_context)
+                if not retrieval_context or not retrieved_symbols:
+                    unresolved_chunks += 1
+                    return []
+                retrieval_rounds_used += 1
+                context_text = retrieval_context
+                sufficiency_prompt = build_prompt(
+                    cfg,
+                    chunk,
+                    index_context=context_text,
+                    allowed_cwe_policy=allowed_cwe_policy,
+                    prompt_kind="sufficiency",
+                )
+                sufficiency_exchange = _run_exchange(
+                    sufficiency_prompt,
+                    stage="sufficiency-retrieval",
+                    extra_events=[f"retrieved_symbols={','.join(retrieved_symbols)}"],
+                )
+                if sufficiency_exchange is None or sufficiency_exchange.error:
+                    failed_chunks += 1
+                    return []
+                sufficiency_decision = parse_sufficiency_decision(sufficiency_exchange.text)
+                if sufficiency_decision is None or not sufficiency_decision.context_is_sufficient:
+                    unresolved_chunks += 1
+                    return []
+                sufficiency_result = "yes"
 
-                    elapsed_retry = max(0.0, time.perf_counter() - t_retry)
-                    total_exchange_time_sec += elapsed_retry
-                    exchange_count += 1
-                    if not retry_result.error:
-                        retry_prompt_tokens = (
-                            retry_result.prompt_tokens
-                            if retry_result.prompt_tokens is not None
-                            else approx_tokens(prompt)
-                        )
-                        retry_completion_tokens = (
-                            retry_result.completion_tokens
-                            if retry_result.completion_tokens is not None
-                            else approx_tokens(retry_result.text, allow_zero=True)
-                        )
-                        retry_total_tokens = (
-                            retry_result.total_tokens
-                            if retry_result.total_tokens is not None
-                            else retry_prompt_tokens + retry_completion_tokens
-                        )
-                        total_exchange_tokens += max(0, int(retry_total_tokens))
-
-                    if prompt_output_path is not None:
-                        prompt_output_entry += 1
-                        if cfg.logging.log_prompts or cfg.logging.log_model_outputs:
-                            append_exchange_header(prompt_output_path, prompt_output_entry, chunk, deep)
-                            append_inference_metadata_section(
-                                prompt_output_path,
-                                timestamp_local=retry_result.timestamp_local,
-                                context_size=(retry_result.context_size or cfg.inference.context),
-                                context_events=retry_result.context_events,
-                                seed=retry_seed,
-                            )
-                            append_ast_chunker_section(prompt_output_path, chunk=chunk)
-                        if cfg.logging.log_prompts:
-                            append_prompt_section(prompt_output_path, prompt)
-                        if cfg.logging.log_model_outputs:
-                            append_output_section(
-                                prompt_output_path,
-                                retry_result.text,
-                                retry_result.error,
-                            )
-
-                    if retry_result.error:
-                        msg = (
-                            "Skipping parse-retry attempt due to inference error "
-                            f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                            f"function={chunk.function or 'N/A'}, seed={retry_seed}): {retry_result.error}"
-                        )
-                        log.warning(msg)
-                        print(msg, file=sys.stderr)
-                        continue
-
-                    parsed_findings, next_id2 = parse_findings(retry_result.text, chunk, start_id=next_id)
-                    parse_errors = [f for f in parsed_findings if f.vulnerability_type == "ParserError"]
-                    if not parse_errors:
-                        result = retry_result
-                        break
-
-                if parse_errors:
-                    parse_error = parse_errors[0].parse_error or "unknown parse error"
-                    msg = (
-                        "Marking chunk unresolved due to unparsable model output "
-                        f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                        f"function={chunk.function or 'N/A'}): {parse_error}"
-                    )
-                    log.warning(msg)
-                    print(msg, file=sys.stderr)
-                    fallback_findings, fallback_next_id = heuristic_fallback_findings(chunk, next_id)
-                    if fallback_findings:
-                        next_id = fallback_next_id
-                        successful_chunks += 1
-                        return fallback_findings
+            if parsed_findings is None or next_id2 is None:
+                detection_prompt = build_prompt(
+                    cfg,
+                    chunk,
+                    index_context=context_text,
+                    allowed_cwe_policy=allowed_cwe_policy,
+                    prompt_kind="detection",
+                )
+                detection_exchange = _run_exchange(
+                    detection_prompt,
+                    stage="detection",
+                    extra_events=[
+                        f"sufficiency_result={sufficiency_result}",
+                        f"retrieved_symbols={','.join(retrieved_symbols) if retrieved_symbols else 'N/A'}",
+                    ],
+                )
+                if detection_exchange is None or detection_exchange.error:
                     failed_chunks += 1
                     return []
 
+                parsed_findings, next_id2, parse_error = parse_findings_with_error(
+                    detection_exchange.text,
+                    chunk,
+                    start_id=next_id,
+                )
+                if parse_error:
+                    retry_result = _retry_once(detection_prompt, stage="detection", parse_error=parse_error)
+                    if retry_result is None or retry_result.error:
+                        unresolved_chunks += 1
+                        return []
+                    parsed_findings, next_id2, parse_error = parse_findings_with_error(
+                        retry_result.text,
+                        chunk,
+                        start_id=next_id,
+                    )
+                    if parse_error:
+                        unresolved_chunks += 1
+                        return []
+
             parsed_findings = normalize_exploitability_classification(parsed_findings)
-            parsed_findings = normalize_cwe_and_apply_local_evidence_gate(parsed_findings, chunk=chunk)
-            if parsed_findings:
-                parsed_findings, next_id2 = augment_with_heuristic_findings(parsed_findings, chunk, next_id2)
-            parsed_findings = apply_phase15_acceptance_gates(
+            parsed_findings, suppression_counts = apply_compact_acceptance_gates(
                 parsed_findings,
                 chunk=chunk,
-                base_index_context=base_index_context,
+                context_text=context_text,
+                allowed_cwe_policy=allowed_cwe_policy,
             )
+            suppressed_by_caller_bounds += suppression_counts["suppressed_by_caller_bounds"]
+            suppressed_by_struct_extent += suppression_counts["suppressed_by_struct_extent"]
+            suppressed_by_contradiction += suppression_counts["suppressed_by_contradiction"]
 
-            if parsed_findings is None or next_id2 is None:
-                msg = (
-                    "Marking chunk unresolved due to missing parsed findings "
-                    f"({pass_name}, {chunk.file}:{chunk.start_line}-{chunk.end_line}, "
-                    f"function={chunk.function or 'N/A'})"
-                )
-                log.warning(msg)
-                print(msg, file=sys.stderr)
-                failed_chunks += 1
-                return []
+            if prompt_output_path is not None and (cfg.logging.log_prompts or cfg.logging.log_model_outputs):
+                with prompt_output_path.open("a", encoding="utf-8") as out:
+                    out.write(
+                        "\n### Controller Summary\n\n"
+                        f"- Sufficiency result: `{sufficiency_result}`\n"
+                        f"- Retrieved symbols: `{', '.join(retrieved_symbols) if retrieved_symbols else 'N/A'}`\n"
+                        f"- Suppression reason: `"
+                        f"{_format_suppression_reason(suppression_counts)}`\n"
+                        f"- Final detection result: `"
+                        f"{', '.join(f.vulnerability_type for f in parsed_findings) if parsed_findings else 'N/A'}`\n"
+                    )
+
             next_id = next_id2
             successful_chunks += 1
             return parsed_findings
@@ -375,9 +396,32 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
         findings = findings[: cfg.scan.max_findings]
 
     if "json" in outputs:
-        append_json_summary(outputs["json"], findings)
+        append_json_summary(
+            outputs["json"],
+            findings,
+            telemetry={
+                "unresolved_chunks": unresolved_chunks,
+                "retrieval_rounds_used": retrieval_rounds_used,
+                "parse_failures": parse_failures,
+                "suppressed_by_caller_bounds": suppressed_by_caller_bounds,
+                "suppressed_by_struct_extent": suppressed_by_struct_extent,
+                "suppressed_by_contradiction": suppressed_by_contradiction,
+            },
+        )
     if "md" in outputs:
-        append_markdown_summary_and_table(outputs["md"], cfg, findings)
+        append_markdown_summary_and_table(
+            outputs["md"],
+            cfg,
+            findings,
+            telemetry={
+                "unresolved_chunks": unresolved_chunks,
+                "retrieval_rounds_used": retrieval_rounds_used,
+                "parse_failures": parse_failures,
+                "suppressed_by_caller_bounds": suppressed_by_caller_bounds,
+                "suppressed_by_struct_extent": suppressed_by_struct_extent,
+                "suppressed_by_contradiction": suppressed_by_contradiction,
+            },
+        )
     if "sarif" in outputs:
         end_time_utc = datetime.now(timezone.utc)
         write_sarif_report(
@@ -403,7 +447,41 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
         total_exchange_time_sec=total_exchange_time_sec,
         exchange_count=exchange_count,
         total_processing_time_sec=total_processing_time_sec,
+        unresolved_chunks=unresolved_chunks,
+        retrieval_rounds_used=retrieval_rounds_used,
+        parse_failures=parse_failures,
+        suppressed_by_caller_bounds=suppressed_by_caller_bounds,
+        suppressed_by_struct_extent=suppressed_by_struct_extent,
+        suppressed_by_contradiction=suppressed_by_contradiction,
     )
 
-    non_parser_findings = [f for f in findings if f.vulnerability_type != "ParserError"]
-    return 1 if non_parser_findings else 0
+    return 1 if findings else 0
+
+
+def _format_suppression_reason(counts: dict[str, int]) -> str:
+    reasons = [name for name, value in counts.items() if value > 0]
+    return ",".join(reasons) if reasons else "none"
+
+
+def _build_retrieval_context(index, symbols: list[str], base_index_context: str) -> tuple[str, list[str]]:
+    lines: list[str] = [base_index_context.strip()] if base_index_context.strip() else []
+    retrieval_lines: list[str] = []
+    resolved_symbols: list[str] = []
+    for symbol in symbols[:2]:
+        name = symbol.strip()
+        if not name:
+            continue
+        snippet = index.get_symbol_definition(name, max_lines=16)
+        if snippet:
+            retrieval_lines.append(f"- {snippet.replace(chr(10), chr(10) + '  ')}")
+            resolved_symbols.append(name)
+            continue
+        refs = index.query_symbol(name)
+        if refs:
+            locations = ", ".join(f"{file}:{line}" for file, line in refs[:3])
+            retrieval_lines.append(f"- {name}: {locations}")
+            resolved_symbols.append(name)
+    if retrieval_lines:
+        lines.append("Retrieved symbols:")
+        lines.extend(retrieval_lines)
+    return "\n".join(lines).strip(), resolved_symbols

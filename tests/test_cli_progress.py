@@ -31,11 +31,15 @@ def _compact_no(*, why: str = "no vulnerability found") -> str:
     )
 
 
+def _compact_sufficiency_yes() -> str:
+    return "#judge: yes\n#function: N/A"
+
+
 def test_progress_prints_during_multipass(monkeypatch, tmp_path: Path, capsys):
     src = tmp_path / "main.c"
     src.write_text(
-        "int add(int a, int b) {\n"
-        "    return a + b;\n"
+        "int mul(int a, int b) {\n"
+        "    return a * b;\n"
         "}\n",
         encoding="utf-8",
     )
@@ -47,8 +51,10 @@ def test_progress_prints_during_multipass(monkeypatch, tmp_path: Path, capsys):
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, _params):
-            return InferenceResult(text=_compact_yes("CWE-200", confidence="medium", why="test finding"))
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
+            return InferenceResult(text=_compact_yes("CWE-190", confidence="medium", why="test finding"))
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -366,10 +372,10 @@ def test_scan_skips_chunk_when_inference_fails(monkeypatch, tmp_path: Path, caps
 
     caplog.set_level(logging.WARNING, logger="vulnllm")
     rc = run()
-    capsys.readouterr()
+    stdout = capsys.readouterr().out
 
     assert rc == 0
-    assert "Skipping function due to inference error" in caplog.text
+    assert "failed_chunks_functions: 1" in stdout
 
 
 def test_scan_continues_when_llm_exchange_raises_exception(monkeypatch, tmp_path: Path, capsys, caplog):
@@ -528,7 +534,7 @@ def test_function_filter_scans_only_selected_function(monkeypatch, tmp_path: Pat
     assert "int foo(int x)" not in prompts[0]
 
 
-def test_scan_marks_chunk_unresolved_on_unparsable_output_without_retry(monkeypatch, tmp_path: Path, caplog):
+def test_scan_marks_chunk_unresolved_after_single_parse_repair_retry(monkeypatch, tmp_path: Path, caplog):
     src = tmp_path / "main.c"
     src.write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
     model = tmp_path / "model.gguf"
@@ -571,10 +577,9 @@ def test_scan_marks_chunk_unresolved_on_unparsable_output_without_retry(monkeypa
     rc = run()
 
     assert rc == 0
-    assert calls["n"] == 1
-    assert seen_seeds == [7]
-    assert "Unparsable model output; retrying" not in caplog.text
-    assert "Marking chunk unresolved due to unparsable model output" in caplog.text
+    assert calls["n"] == 2
+    assert seen_seeds == [7, 8]
+    assert "Malformed model output; retrying once with different seed" in caplog.text
 
 
 def test_scan_retries_unparsable_output_with_different_seed(monkeypatch, tmp_path: Path, caplog):
@@ -590,15 +595,14 @@ def test_scan_retries_unparsable_output_with_different_seed(monkeypatch, tmp_pat
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, params):
+        def generate(self, prompt, params):
             calls["n"] += 1
             seen_seeds.append(params.seed)
             if calls["n"] == 1:
                 return InferenceResult(text="invalid-output", error=None)
-            return InferenceResult(
-                text=_compact_yes("CWE-190", confidence="medium", why="d"),
-                error=None,
-            )
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
+            return InferenceResult(text=_compact_yes("CWE-190", confidence="medium", why="d"), error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -625,12 +629,11 @@ def test_scan_retries_unparsable_output_with_different_seed(monkeypatch, tmp_pat
     rc = run()
 
     assert rc == 1
-    assert seen_seeds == [7, 8]
-    assert "Unparsable model output; retrying with different seed" in caplog.text
-    assert "Marking chunk unresolved due to unparsable model output" not in caplog.text
+    assert seen_seeds == [7, 8, 7]
+    assert "Malformed model output; retrying once with different seed" in caplog.text
 
 
-def test_scan_uses_heuristic_fallback_for_unparsable_unsafe_sink(monkeypatch, tmp_path: Path):
+def test_scan_leaves_unparsable_unsafe_sink_unresolved_without_heuristic_fallback(monkeypatch, tmp_path: Path):
     src = tmp_path / "main.c"
     src.write_text(
         "void write_user_file(const char *relative_path) {\n"
@@ -670,10 +673,10 @@ def test_scan_uses_heuristic_fallback_for_unparsable_unsafe_sink(monkeypatch, tm
     )
 
     rc = run()
-    report = (out_dir / "scan.json").read_text(encoding="utf-8")
-    assert rc == 1
-    assert "CWE-787" in report
-    assert "CWE-22" in report
+    payload = json.loads((out_dir / "scan.json").read_text(encoding="utf-8"))
+    assert rc == 0
+    assert payload["summary"]["total_findings"] == 0
+    assert payload["summary"]["telemetry"]["unresolved_chunks"] == 1
 
 
 def test_heuristic_augmentation_assigns_sequential_ids_for_appended_findings():
@@ -771,10 +774,8 @@ def test_report_ids_are_sequential_for_emitted_findings(monkeypatch, tmp_path: P
 def test_scan_accepts_compact_output_wrapped_in_fence(monkeypatch, tmp_path: Path, caplog):
     src = tmp_path / "main.c"
     src.write_text(
-        "int add(size_t size, int a, int b) {\n"
-        "    if (size < 8) return a;\n"
-        "    VERIFY_CHECK(size < 1024);\n"
-        "    return a + b;\n"
+        "int mul(size_t size, int a, int b) {\n"
+        "    return a * b;\n"
         "}\n",
         encoding="utf-8",
     )
@@ -787,12 +788,11 @@ def test_scan_accepts_compact_output_wrapped_in_fence(monkeypatch, tmp_path: Pat
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, params):
+        def generate(self, prompt, params):
             seen_seeds.append(params.seed)
-            return InferenceResult(
-                text="```text\n#judge: yes\n#type: CWE-200\n#confidence: high\n#need_context: N/A\n#why: d\n```",
-                error=None,
-            )
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text="```text\n#judge: yes\n#function: N/A\n```", error=None)
+            return InferenceResult(text="```text\n#judge: yes\n#type: CWE-190\n#confidence: high\n#need_context: N/A\n#why: d\n```", error=None)
 
     monkeypatch.setattr("vulnllm.cli.LlamaBackend", FakeBackend)
     monkeypatch.setattr(
@@ -817,8 +817,8 @@ def test_scan_accepts_compact_output_wrapped_in_fence(monkeypatch, tmp_path: Pat
     rc = run()
 
     assert rc == 1
-    assert seen_seeds == [11]
-    assert "Marking chunk unresolved due to unparsable model output" not in caplog.text
+    assert seen_seeds == [11, 11]
+    assert "Malformed model output" not in caplog.text
 
 
 def test_scan_accepts_findings_without_evidence_spans_after_gate_relaxation(monkeypatch, tmp_path: Path):

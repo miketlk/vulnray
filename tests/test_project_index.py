@@ -34,16 +34,33 @@ def test_project_index_builds_contract_aware_context_packet(tmp_path: Path):
     packet = index.build_context_packet("process_user", current_file="app.c")
 
     assert "Nearest declaration:" in packet
-    assert "Top callers:" in packet
-    assert "Direct callees:" in packet
-    assert "Assertion facts:" in packet
-    assert "Local size/range facts:" in packet
+    assert "Caller write-budget summaries:" in packet
+    assert "Relevant callees:" in packet
+    assert "Nearby checks:" in packet
     assert "Deterministic facts:" in packet
     assert "- - " not in packet
-    assert "Contract Summary:" in packet
-    assert "Macro snippets:" in packet
     assert "Call path context" in packet
     assert "main -> process_user" in packet
+
+
+def test_project_index_builds_caller_write_budget_summary(tmp_path: Path):
+    src = tmp_path / "app.c"
+    src.write_text(
+        "int helper(char *dst, const char *src, int len) {\n"
+        "    return len;\n"
+        "}\n"
+        "int caller(void) {\n"
+        "    char keydata[112];\n"
+        "    return helper(keydata, \"x\", 64);\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    index = build_project_index([src], tmp_path)
+    packet = index.build_context_packet("helper", current_file="app.c")
+
+    assert "Caller write-budget summaries:" in packet
+    assert "caller=caller, destination=keydata, destination_extent=112, maximum_cumulative_write=64" in packet
 
 
 def test_project_index_get_function_definition_returns_code(tmp_path: Path):

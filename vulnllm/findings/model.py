@@ -5,9 +5,11 @@ from dataclasses import dataclass, field
 
 from vulnllm.chunking.function_chunker import CodeChunk
 from vulnllm.findings.compact_block import (
-    compact_decision_to_payload,
-    extract_complete_sane_compact_block,
-    extract_last_compact_decision,
+    CompactSufficiencyDecision,
+    extract_complete_sane_detection_block,
+    extract_last_detection_decision,
+    extract_last_sufficiency_decision,
+    extract_legacy_requested_symbols,
 )
 from vulnllm.findings.severity import normalize_severity
 
@@ -89,84 +91,100 @@ def _normalize_exploitability(value: object) -> str:
 
 
 def extract_complete_sane_formatted_output_block(raw: str) -> str | None:
-    return extract_complete_sane_compact_block(raw, allow_early_negative_without_context=True)
+    return extract_complete_sane_detection_block(raw)
 
 
 def extract_decision_metadata(raw: str) -> tuple[list[str], list[str]]:
-    decision = extract_last_compact_decision(
-        raw,
-        require_complete_why_line=False,
-        allow_early_negative_without_context=True,
-    )
+    decision = extract_last_detection_decision(raw)
     if decision is None:
-        return [], []
+        return [], extract_legacy_requested_symbols(raw)
 
     vuln_types = [t.strip() for t in re.split(r"[;,]", decision.vuln_type) if t.strip()]
     cwes = [v.upper() for v in vuln_types if v.upper().startswith("CWE-")]
-    symbols = [str(x).strip() for x in decision.need_context_symbols if str(x).strip()]
-    return cwes, symbols
+    return cwes, extract_legacy_requested_symbols(raw)
 
 
-def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[Finding], int]:
+def parse_sufficiency_decision(raw: str) -> CompactSufficiencyDecision | None:
+    return extract_last_sufficiency_decision(raw)
+
+
+def parse_findings_with_error(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[Finding], int, str | None]:
+    decision = extract_last_detection_decision(raw)
+    if decision is None:
+        return [], start_id, "No valid detection output block found"
+
+    if decision.judge == "no":
+        return [], start_id, None
+
+    raw_types = [t.strip() for t in re.split(r"[;,]", decision.vuln_type) if t.strip()]
+    if not raw_types:
+        return [], start_id, "No valid CWE values in detection output"
+
+    confidence = {"low": 0.5, "medium": 0.7, "high": 0.9}.get(decision.confidence_label, 0.7)
+    legacy_context_sufficient = "unknown"
+    ctx_m = re.search(r"(?im)^\s*#context_sufficient:\s*(yes|no)\s*$", raw)
+    if ctx_m:
+        legacy_context_sufficient = "sufficient" if ctx_m.group(1).strip().lower() == "yes" else "insufficient"
+    legacy_where = "none"
+    where_m = re.search(r"(?im)^\s*#where_precondition_is_enforced:\s*([^\n\r]+)\s*$", raw)
+    if where_m:
+        legacy_where = where_m.group(1).strip()
+    requires_caller_violation = False
+    caller_m = re.search(r"(?im)^\s*#caller_violation_required:\s*(yes|no)\s*$", raw)
+    if caller_m:
+        requires_caller_violation = caller_m.group(1).strip().lower() == "yes"
+    bounds_contradiction = False
+    bounds_m = re.search(r"(?im)^\s*#bounds_contradiction:\s*(yes|no)\s*$", raw)
+    if bounds_m:
+        bounds_contradiction = bounds_m.group(1).strip().lower() == "yes"
+    contract_breach = False
+    contract_m = re.search(r"(?im)^\s*#contract_breach_evidence:\s*(yes|no)\s*$", raw)
+    if contract_m:
+        contract_breach = contract_m.group(1).strip().lower() == "yes"
+    claim = ""
+    claim_m = re.search(r"(?im)^\s*#claim:\s*([^\n\r]+)\s*$", raw)
+    if claim_m:
+        claim = claim_m.group(1).strip()
+    precondition = ""
+    precondition_m = re.search(r"(?im)^\s*#precondition:\s*([^\n\r]+)\s*$", raw)
+    if precondition_m:
+        precondition = precondition_m.group(1).strip()
+    trigger_path = ""
+    sink_m = re.search(r"(?im)^\s*#sink:\s*([^\n\r]+)\s*$", raw)
+    if sink_m:
+        trigger_path = sink_m.group(1).strip()
     findings: list[Finding] = []
-    try:
-        decision = extract_last_compact_decision(
-            raw,
-            require_complete_why_line=False,
-            allow_early_negative_without_context=True,
-        )
-        if decision is None:
-            raise ValueError("No valid compact output block found")
-        obj = compact_decision_to_payload(decision)
-        vulns = obj.get("vulnerabilities", [])
-        if not isinstance(vulns, list):
-            raise ValueError("vulnerabilities must be list")
-
-        next_id = start_id
-        for v in vulns:
-            if not isinstance(v, dict):
-                continue
-            f = Finding(
+    next_id = start_id
+    for vuln_type in raw_types:
+        normalized_type = vuln_type.upper() if vuln_type.upper().startswith("CWE-") else vuln_type
+        findings.append(
+            Finding(
                 id=f"F-{next_id:04d}",
                 file=chunk.file,
                 start_line=chunk.start_line,
                 end_line=chunk.end_line,
                 function=chunk.function,
-                vulnerability_type=str(v.get("vulnerability_type", "Potential Vulnerability")),
-                severity=normalize_severity(str(v.get("severity", "medium"))),
-                confidence=float(v.get("confidence", 0.5) or 0.5),
-                description=str(v.get("description", "")),
-                reasoning=str(v.get("reasoning", "")),
-                references=[str(x) for x in v.get("references", []) if x],
-                recommendation=str(v.get("recommendation", "")),
-                claim=str(v.get("claim", "")),
-                precondition=str(v.get("precondition", "")),
-                where_precondition_is_enforced=str(v.get("where_precondition_is_enforced", "none") or "none"),
-                trigger_path=str(v.get("trigger_path", "")),
-                exploitability=_normalize_exploitability(v.get("exploitability", "theoretical")),
-                contract_breach_evidence=_parse_bool(v.get("contract_breach_evidence"), default=False),
-                attacker_controlled_input=_parse_bool(v.get("attacker_controlled_input"), default=False),
-                bounds_contradiction_evidence=_parse_bool(v.get("bounds_contradiction_evidence"), default=False),
-                analysis_mode=_normalize_analysis_mode(v.get("analysis_mode", "shallow")),
-                evidence_spans=_parse_evidence_spans_count(v.get("evidence_spans")),
-                requires_caller_violation=_parse_bool(v.get("requires_caller_violation"), default=False),
-                context_sufficiency=_normalize_context_sufficiency(v.get("context_sufficiency", "unknown")),
+                vulnerability_type=normalized_type,
+                severity=normalize_severity("medium"),
+                confidence=confidence,
+                description=decision.why,
+                reasoning=decision.why,
+                references=[normalized_type] if normalized_type.upper().startswith("CWE-") else [],
+                recommendation="Manually review and confirm exploitability.",
+                claim=claim,
+                precondition=precondition,
+                where_precondition_is_enforced=legacy_where,
+                trigger_path=trigger_path,
+                contract_breach_evidence=contract_breach,
+                bounds_contradiction_evidence=bounds_contradiction,
+                requires_caller_violation=requires_caller_violation,
+                context_sufficiency=legacy_context_sufficient,
             )
-            findings.append(f)
-            next_id += 1
-        return findings, next_id
-    except Exception as e:
-        err = Finding(
-            id=f"F-{start_id:04d}",
-            file=chunk.file,
-            start_line=chunk.start_line,
-            end_line=chunk.end_line,
-            function=chunk.function,
-            vulnerability_type="ParserError",
-            severity="low",
-            confidence=0.0,
-            description="Failed to parse model output",
-            reasoning=raw[:1200],
-            parse_error=str(e),
         )
-        return [err], start_id + 1
+        next_id += 1
+    return findings, next_id, None
+
+
+def parse_findings(raw: str, chunk: CodeChunk, start_id: int = 1) -> tuple[list[Finding], int]:
+    findings, next_id, _parse_error = parse_findings_with_error(raw, chunk, start_id=start_id)
+    return findings, next_id

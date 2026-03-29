@@ -13,20 +13,20 @@ def _compact_yes(vuln_type: str) -> str:
     return (
         f"#judge: yes\n"
         f"#type: {vuln_type}\n"
-        "#confidence: high\n"
-        "#need_context: N/A\n"
         "#why: detected issue"
     )
 
 
 def _compact_no() -> str:
-    return (
-        "#judge: no\n"
-        "#type: N/A\n"
-        "#confidence: high\n"
-        "#need_context: N/A\n"
-        "#why: no vulnerability found"
-    )
+    return "#judge: no\n#type: N/A"
+
+
+def _compact_sufficiency_yes() -> str:
+    return "#judge: yes\n#function: N/A"
+
+
+def _compact_sufficiency_no(symbols: str = "helper") -> str:
+    return f"#judge: no\n#function: {symbols}"
 
 
 def _cfg(tmp_path: Path) -> Config:
@@ -55,7 +55,9 @@ def test_run_scan_returns_zero_for_no_findings(tmp_path: Path):
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, _params):
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
             return InferenceResult(text=_compact_no(), error=None)
 
     rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
@@ -74,7 +76,9 @@ def test_run_scan_returns_one_and_writes_finding(tmp_path: Path):
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, _params):
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
             return InferenceResult(text=_compact_yes("CWE-190"), error=None)
 
     rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
@@ -95,7 +99,9 @@ def test_run_scan_writes_sarif_output(tmp_path: Path):
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, _params):
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
             return InferenceResult(text=_compact_yes("CWE-190"), error=None)
 
     rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
@@ -104,6 +110,36 @@ def test_run_scan_writes_sarif_output(tmp_path: Path):
     payload = json.loads(sarif_path.read_text(encoding="utf-8"))
     assert payload["version"] == "2.1.0"
     assert len(payload["runs"][0]["results"]) == 1
+
+
+def test_run_scan_retrieval_pass_retries_with_requested_symbols(tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "int helper(int x) { return x + 1; }\n"
+        "int target(int x) { int y = helper(x); return x * y; }\n",
+        encoding="utf-8",
+    )
+    cfg = _cfg(tmp_path)
+    cfg.project.index = "basic"
+    cfg.scan.function = "target"
+    calls = {"count": 0}
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, prompt, _params):
+            calls["count"] += 1
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                if "Retrieved symbols:" in prompt:
+                    return InferenceResult(text=_compact_sufficiency_yes(), error=None)
+                return InferenceResult(text=_compact_sufficiency_no("helper"), error=None)
+            return InferenceResult(text=_compact_yes("CWE-190"), error=None)
+
+    rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
+
+    assert rc == 1
+    assert calls["count"] >= 2
 
 
 def test_run_scan_mixed_json_and_sarif_outputs(tmp_path: Path):
@@ -116,7 +152,9 @@ def test_run_scan_mixed_json_and_sarif_outputs(tmp_path: Path):
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, _params):
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
             return InferenceResult(text=_compact_yes("CWE-190"), error=None)
 
     rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
@@ -140,7 +178,9 @@ def test_sarif_uses_final_deduplicated_and_truncated_findings(tmp_path: Path):
         def __init__(self, _cfg):
             pass
 
-        def generate(self, _prompt, _params):
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
             return InferenceResult(text=_compact_yes("CWE-190"), error=None)
 
     rc = run_scan(cfg, root=tmp_path, files=[src1, src2], backend_factory=FakeBackend)
@@ -148,3 +188,32 @@ def test_sarif_uses_final_deduplicated_and_truncated_findings(tmp_path: Path):
     sarif_path = tmp_path / "reports" / "scan.sarif"
     payload = json.loads(sarif_path.read_text(encoding="utf-8"))
     assert len(payload["runs"][0]["results"]) == 1
+
+
+def test_run_scan_records_unresolved_chunk_telemetry(tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "int helper(int x) { return x + 1; }\n"
+        "int target(int x) { return helper(x); }\n",
+        encoding="utf-8",
+    )
+    cfg = _cfg(tmp_path)
+    cfg.project.index = "basic"
+    cfg.scan.function = "target"
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_no("missing_symbol"), error=None)
+            raise AssertionError("detection should not run for unresolved sufficiency")
+
+    rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
+
+    assert rc == 0
+    payload = json.loads((tmp_path / "reports" / "scan.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["total_findings"] == 0
+    assert payload["summary"]["telemetry"]["unresolved_chunks"] == 1
+    assert payload["summary"]["telemetry"]["retrieval_rounds_used"] == 0

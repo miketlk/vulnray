@@ -6,7 +6,10 @@ import re
 from typing import Any
 
 from vulnllm.config import Config
-from vulnllm.findings.compact_block import extract_complete_sane_compact_block
+from vulnllm.findings.compact_block import (
+    extract_complete_sane_detection_block,
+    extract_complete_sane_sufficiency_block,
+)
 from vulnllm.inference.parameters import GenerationParams
 from vulnllm.utils.model_paths import resolve_model_path
 
@@ -85,7 +88,7 @@ class LlamaBackend:
             "\nOutput format",
             "\n```",
         ]
-        if "#judge: yes|no" in prompt and "#type: CWE-xx|N/A" in prompt:
+        if "#judge: yes|no" in prompt and ("#type: CWE-xx|N/A" in prompt or "#function: N/A|symbol_a,symbol_b" in prompt):
             streamed = self._create_completion_with_early_termination(
                 llm=llm,
                 prompt=prompt,
@@ -127,6 +130,7 @@ class LlamaBackend:
             return None
 
         chunks: list[str] = []
+        detection_mode = "#type: CWE-xx|N/A" in prompt
         for delta in stream:
             text = ""
             if isinstance(delta, dict):
@@ -137,11 +141,11 @@ class LlamaBackend:
                         text = str(first.get("text", ""))
             if text:
                 chunks.append(text)
-                candidate = extract_complete_sane_compact_block(
-                    "".join(chunks),
-                    allow_early_negative_without_context=True,
-                    require_clean_prefix_for_early_negative=True,
-                )
+                joined = "".join(chunks)
+                if detection_mode:
+                    candidate = extract_complete_sane_detection_block(joined)
+                else:
+                    candidate = extract_complete_sane_sufficiency_block(joined)
                 if candidate is not None:
                     return {"choices": [{"text": candidate}], "usage": {}}
 

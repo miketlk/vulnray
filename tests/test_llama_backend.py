@@ -66,14 +66,10 @@ def test_parse_findings_handles_prompt_echo_and_example_block():
 Output format (plain text, exactly these keys):
 #judge: yes|no
 #type: CWE-xx|N/A
-#confidence: low|medium|high
-#need_context: N/A|symbol_a,symbol_b
 #why: one short sentence
 
 #judge: yes
 #type: CWE-190
-#confidence: high
-#need_context: N/A
 #why: overflow in multiplication path
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
@@ -87,15 +83,10 @@ def test_parse_findings_prefers_last_valid_compact_block():
     raw = """
 #judge: yes
 #type: CWE-120
-#confidence: high
-#need_context: N/A
 #why: intermediate answer
 
 #judge: no
 #type: N/A
-#confidence: low
-#need_context: helper_a
-#why: final answer says insufficient context
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
@@ -108,7 +99,6 @@ def test_parse_findings_accepts_compact_yes():
 #judge: yes
 #type: CWE-787
 #confidence: high
-#need_context: N/A
 #why: unchecked copy may overflow destination
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
@@ -121,12 +111,41 @@ def test_parse_findings_accepts_compact_yes():
     assert findings[0].confidence == 0.9
 
 
+def test_parse_findings_accepts_evidence_structured_fields():
+    raw = """
+#context_sufficient: yes
+#need_context: N/A
+#missing_fact_kind: N/A
+#judge: yes
+#type: CWE-120
+#confidence: medium
+#claim: destination can overflow on oversized source
+#sink: strcpy(dst, src)
+#precondition: src length exceeds destination size
+#where_precondition_is_enforced: none
+#caller_violation_required: yes
+#bounds_contradiction: no
+#contract_breach_evidence: yes
+#why: overflow path remains reachable
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].context_sufficiency == "sufficient"
+    assert findings[0].claim == "destination can overflow on oversized source"
+    assert findings[0].trigger_path == "strcpy(dst, src)"
+    assert findings[0].precondition == "src length exceeds destination size"
+    assert findings[0].where_precondition_is_enforced == "none"
+    assert findings[0].requires_caller_violation is True
+    assert findings[0].contract_breach_evidence is True
+    assert findings[0].bounds_contradiction_evidence is False
+
+
 def test_parse_findings_accepts_multiple_types_in_compact_yes():
     raw = """
 #judge: yes
 #type: CWE-787, CWE-22
-#confidence: high
-#need_context: N/A
 #why: multiple distinct issues found
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
@@ -143,9 +162,6 @@ def test_parse_findings_accepts_compact_no():
     raw = """
 #judge: no
 #type: N/A
-#confidence: low
-#need_context: helper_a, helper_b
-#why: missing caller validation context
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
@@ -153,12 +169,24 @@ def test_parse_findings_accepts_compact_no():
     assert findings == []
 
 
+def test_parse_findings_accepts_compact_block_without_confidence():
+    raw = """
+#judge: yes
+#type: CWE-190
+#why: unchecked multiplication path
+"""
+    chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
+    findings, _ = parse_findings(raw, chunk)
+
+    assert len(findings) == 1
+    assert findings[0].vulnerability_type == "CWE-190"
+    assert findings[0].confidence == 0.7
+
+
 def test_parse_findings_accepts_early_negative_without_why_when_no_context_requested():
     raw = """
 #judge: no
 #type: N/A
-#confidence: high
-#need_context: N/A
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
     findings, _ = parse_findings(raw, chunk)
@@ -169,7 +197,6 @@ def test_extract_decision_metadata_parses_compact_output():
     raw = """
 #judge: yes
 #type: CWE-120
-#confidence: high
 #need_context: User, create_user
 #why: unchecked copy into fixed buffer
 """
@@ -182,7 +209,6 @@ def test_extract_decision_metadata_parses_multiple_cwes():
     raw = """
 #judge: yes
 #type: CWE-120, CWE-22
-#confidence: high
 #need_context: User, create_user
 #why: two findings
 """
@@ -196,14 +222,10 @@ def test_parse_findings_ignores_example_output_compact_block():
 Example output:
 #judge: yes|no
 #type: CWE-xx|N/A
-#confidence: low|medium|high
-#need_context: N/A|symbol_a,symbol_b
 #why: one short sentence
 
 #judge: yes
 #type: CWE-787
-#confidence: high
-#need_context: N/A
 #why: real finding
 """
     chunk = CodeChunk(file="test.c", start_line=1, end_line=10, text="int main(){}", function="main")
@@ -218,14 +240,10 @@ def test_extract_complete_sane_formatted_output_block_skips_example_output():
 Example output:
 #judge: yes|no
 #type: CWE-xx|N/A
-#confidence: low|medium|high
-#need_context: N/A|symbol_a,symbol_b
 #why: one short sentence
 
 #judge: yes
 #type: CWE-190
-#confidence: high
-#need_context: N/A
 #why: real finding
 extra tail
 """
@@ -413,8 +431,6 @@ def test_llama_backend_stops_early_after_complete_sane_formatted_block(tmp_path:
     streamed_text = (
         "#judge: yes\n"
         "#type: CWE-787\n"
-        "#confidence: high\n"
-        "#need_context: N/A\n"
         "#why: real finding\n"
         + tail
     )
@@ -459,8 +475,6 @@ def test_llama_backend_stops_early_on_negative_without_context_request(tmp_path:
     streamed_text = (
         "#judge: no\n"
         "#type: N/A\n"
-        "#confidence: high\n"
-        "#need_context: N/A\n"
         + tail
     )
 
@@ -490,24 +504,20 @@ def test_llama_backend_stops_early_on_negative_without_context_request(tmp_path:
     )
 
     assert result.error is None
-    assert result.text.endswith("#need_context: N/A")
+    assert result.text == "#judge: no\n#type: N/A"
     assert "TRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED" not in result.text
     assert len(yielded_tokens) < len(streamed_text)
 
 
-def test_llama_backend_does_not_use_early_negative_stop_when_preamble_exists(tmp_path: Path, monkeypatch):
+def test_llama_backend_stops_early_for_sufficiency_block(tmp_path: Path, monkeypatch):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"GGUF")
 
     yielded_tokens: list[str] = []
     tail = "\nTRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED"
     streamed_text = (
-        "thinking out loud\n"
         "#judge: no\n"
-        "#type: N/A\n"
-        "#confidence: high\n"
-        "#need_context: N/A\n"
-        "#why: final decision\n"
+        "#function: helper, user_type\n"
         + tail
     )
 
@@ -532,11 +542,11 @@ def test_llama_backend_does_not_use_early_negative_stop_when_preamble_exists(tmp
     backend = LlamaBackend(cfg)
 
     result = backend.generate(
-        "Output format (plain text, exactly these keys):\n#judge: yes|no\n#type: CWE-xx|N/A",
+        "Output format (plain text, exactly these keys):\n#judge: yes|no\n#function: N/A|symbol_a,symbol_b",
         GenerationParams(temperature=0.1, top_p=0.95, seed=0, max_tokens=256),
     )
 
     assert result.error is None
-    assert result.text.endswith("#why: final decision")
+    assert result.text == "#judge: no\n#function: helper, user_type"
     assert "TRAILING_TOKENS_SHOULD_NOT_BE_CONSUMED" not in result.text
     assert len(yielded_tokens) < len(streamed_text)

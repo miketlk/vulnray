@@ -20,9 +20,12 @@ __all__ = [
     "run_llm_inference_test",
     "build_chunks",
     "index_context",
+    "candidate_cwe_policy_for_chunk",
+    "secondary_cwe_candidates_for_chunk",
     "normalize_exploitability_classification",
     "non_llm_context_sufficiency",
     "apply_phase15_acceptance_gates",
+    "apply_compact_acceptance_gates",
     "normalize_cwe_and_apply_local_evidence_gate",
     "heuristic_fallback_findings",
     "augment_with_heuristic_findings",
@@ -76,10 +79,10 @@ def run_llm_inference_test(cfg, *, backend_factory) -> int:
     prompt = (
         "You are an advanced vulnerability detection model.\n"
         "Analyze the target function and output only this format:\n"
-        "#judge: yes|no\n#type: CWE-xx|N/A\n#confidence: low|medium|high\n"
-        "#need_context: N/A|symbol_a,symbol_b\n#why: one short sentence\n"
+        "#judge: yes|no\n#type: CWE-xx|N/A\n#why: one short sentence\n"
         "```c\n"
         "// context\n"
+        "// Allowed CWE policy: CWE-120, CWE-787, N/A\n"
         "// N/A\n"
         "// target function\n"
         "void copy(char *dst, const char *src) {\n"
@@ -169,6 +172,66 @@ def index_context(index: ProjectIndex | None, chunk: CodeChunk) -> str:
     return "Known symbol locations:\n" + "\n".join(f"- {f}:{line}" for f, line in refs[:5])
 
 
+def candidate_cwe_policy_for_chunk(chunk: CodeChunk) -> tuple[str, ...]:
+    text = chunk.text.lower()
+    policy: list[str] = []
+
+    has_memory_sink = any(token in text for token in ("strcpy(", "strcat(", "memcpy(", "memmove(", "gets(", "sprintf("))
+    has_path_use = any(token in text for token in ("fopen(", "open(", "path", "relative_path"))
+    has_arithmetic = any(token in chunk.text for token in ("*", "+", "-", "<<", ">>"))
+
+    if has_memory_sink:
+        policy.extend(["CWE-120", "CWE-787"])
+    if has_path_use:
+        policy.append("CWE-22")
+    if has_arithmetic:
+        policy.append("CWE-190")
+    policy.append("N/A")
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for cwe in policy:
+        key = cwe.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cwe)
+        if len(deduped) >= 4 and cwe != "N/A":
+            continue
+    if "N/A" not in deduped:
+        deduped.append("N/A")
+    return tuple(deduped[:5])
+
+
+def secondary_cwe_candidates_for_chunk(
+    chunk: CodeChunk,
+    *,
+    existing_findings: list[Finding] | tuple[Finding, ...] = (),
+) -> tuple[str, ...]:
+    text = chunk.text.lower()
+    visible: list[str] = []
+
+    if any(token in text for token in ("strcpy(", "strcat(", "gets(")):
+        visible.append("CWE-120")
+    if "sprintf(" in text:
+        visible.append("CWE-787")
+    if _has_visible_path_violation(chunk):
+        visible.append("CWE-22")
+    if _has_visible_integer_violation(chunk):
+        visible.append("CWE-190")
+
+    found_types = {(finding.vulnerability_type or "").upper() for finding in existing_findings}
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for cwe in visible:
+        key = cwe.upper()
+        if key in seen or key in found_types:
+            continue
+        seen.add(key)
+        deduped.append(cwe)
+    return tuple(deduped[:2])
+
+
 def normalize_exploitability_classification(findings: list[Finding]) -> list[Finding]:
     normalized: list[Finding] = []
     for finding in findings:
@@ -197,18 +260,175 @@ def apply_phase15_acceptance_gates(
     *,
     chunk: CodeChunk,
     base_index_context: str,
+    allowed_cwe_policy: tuple[str, ...] = (),
 ) -> list[Finding]:
     sufficiency, _score = non_llm_context_sufficiency(chunk, base_index_context)
+    allowed_cwes = {cwe.upper() for cwe in allowed_cwe_policy if cwe.upper().startswith("CWE-")}
+    policy_controlled_cwes = {"CWE-119", "CWE-120", "CWE-121", "CWE-125", "CWE-190", "CWE-22", "CWE-787"}
+    helper_caller_safe = _is_helper_sink_and_caller_path_proves_safe(chunk, base_index_context)
     guarded: list[Finding] = []
 
     for finding in findings:
-        finding.context_sufficiency = sufficiency
+        model_marked_insufficient = finding.context_sufficiency == "insufficient"
+        if finding.context_sufficiency == "unknown":
+            finding.context_sufficiency = sufficiency
+
+        if model_marked_insufficient:
+            continue
+
+        vuln_upper = (finding.vulnerability_type or "").upper()
+        if vuln_upper in policy_controlled_cwes and allowed_cwes and vuln_upper not in allowed_cwes:
+            continue
 
         if finding.exploitability == "contract-break-only" and not finding.contract_breach_evidence:
             continue
 
+        if finding.requires_caller_violation and not finding.contract_breach_evidence:
+            continue
+
+        if finding.bounds_contradiction_evidence:
+            continue
+
+        where = (finding.where_precondition_is_enforced or "").strip().lower()
+        if finding.requires_caller_violation and where in {"assertion", "caller_check"}:
+            continue
+
+        if helper_caller_safe and vuln_upper in {"CWE-119", "CWE-120", "CWE-121", "CWE-125", "CWE-787"}:
+            continue
+
         guarded.append(finding)
     return guarded
+
+
+def apply_compact_acceptance_gates(
+    findings: list[Finding],
+    *,
+    chunk: CodeChunk,
+    context_text: str,
+    allowed_cwe_policy: tuple[str, ...] = (),
+) -> tuple[list[Finding], dict[str, int]]:
+    allowed_cwes = {cwe.upper() for cwe in allowed_cwe_policy if cwe.upper().startswith("CWE-")}
+    counters = {
+        "suppressed_by_caller_bounds": 0,
+        "suppressed_by_struct_extent": 0,
+        "suppressed_by_contradiction": 0,
+        "suppressed_by_hypothetical_caller_misuse": 0,
+    }
+    helper_caller_safe = _is_helper_sink_and_caller_path_proves_safe(chunk, context_text)
+    struct_extent_safe = _struct_extent_proves_visible_access_safe(chunk, context_text)
+    contradiction_safe = _visible_contradiction_proves_safe(chunk, context_text)
+    out: list[Finding] = []
+
+    for finding in findings:
+        vuln_upper = (finding.vulnerability_type or "").upper()
+        if allowed_cwes and vuln_upper.startswith("CWE-") and vuln_upper not in allowed_cwes:
+            continue
+
+        if helper_caller_safe and vuln_upper in {"CWE-119", "CWE-120", "CWE-121", "CWE-125", "CWE-787"}:
+            counters["suppressed_by_caller_bounds"] += 1
+            continue
+        if struct_extent_safe and vuln_upper in {"CWE-119", "CWE-120", "CWE-121", "CWE-125", "CWE-787"}:
+            counters["suppressed_by_struct_extent"] += 1
+            continue
+        if contradiction_safe and vuln_upper in {"CWE-119", "CWE-120", "CWE-121", "CWE-125", "CWE-190", "CWE-787"}:
+            counters["suppressed_by_contradiction"] += 1
+            continue
+        if vuln_upper in {"CWE-119", "CWE-120", "CWE-121", "CWE-125", "CWE-787"} and not _has_visible_local_sink_violation(chunk):
+            counters["suppressed_by_hypothetical_caller_misuse"] += 1
+            continue
+        if vuln_upper == "CWE-22" and not _has_visible_path_violation(chunk):
+            continue
+        if vuln_upper == "CWE-190" and not _has_visible_integer_violation(chunk):
+            continue
+        out.append(finding)
+
+    return out, counters
+
+
+def _has_unbounded_memory_sink_without_local_checks(chunk: CodeChunk) -> bool:
+    text = chunk.text.lower()
+    has_sink = any(token in text for token in ("strcpy(", "strcat(", "sprintf(", "memcpy(", "memmove(", "gets("))
+    has_local_checks = bool(
+        re.search(r"\b(ARG_CHECK|VERIFY_CHECK|STATIC_ASSERT|assert)\s*\(", chunk.text)
+        or re.search(r"\bif\s*\(([^)]*(?:len|size|count|bound|limit|max|min|index|idx)[^)]*)\)", chunk.text, re.IGNORECASE)
+    )
+    return has_sink and not has_local_checks
+
+
+def _caller_path_proves_safe(base_index_context: str) -> bool:
+    if not base_index_context.strip():
+        return False
+    pairs = re.findall(
+        r"destination_extent\s*=\s*(\d+)\s*,\s*maximum_cumulative_write\s*=\s*(\d+)",
+        base_index_context,
+        flags=re.IGNORECASE,
+    )
+    if not pairs:
+        return False
+    return all(int(write) <= int(extent) for extent, write in pairs)
+
+
+def _is_helper_sink_and_caller_path_proves_safe(chunk: CodeChunk, base_index_context: str) -> bool:
+    helper_like = "Caller write-budget summaries:" in base_index_context or "Call path context" in base_index_context
+    return helper_like and _has_unbounded_memory_sink_without_local_checks(chunk) and _caller_path_proves_safe(base_index_context)
+
+
+def _has_visible_local_sink_violation(chunk: CodeChunk) -> bool:
+    lowered = chunk.text.lower()
+    facts = "\n".join(chunk.preprocessing_facts).lower()
+    if any(token in lowered for token in ("strcpy(", "strcat(", "gets(")):
+        return True
+    if "sprintf(" in lowered and "char " in chunk.text and "[" in chunk.text:
+        return True
+    if "without explicit bound" in facts:
+        return True
+    for line in chunk.preprocessing_facts:
+        if "sink extent:" not in line.lower():
+            continue
+        m = re.search(r"destination_extent=(\d+).+maximum_cumulative_write=(\d+)", line)
+        if m and int(m.group(2)) > int(m.group(1)):
+            return True
+    return False
+
+
+def _has_visible_path_violation(chunk: CodeChunk) -> bool:
+    lowered = chunk.text.lower()
+    return "fopen(" in lowered and ("relative_path" in lowered or "path" in lowered)
+
+
+def _has_visible_integer_violation(chunk: CodeChunk) -> bool:
+    return bool(re.search(r"\breturn\s+[A-Za-z_]\w*\s*\*\s*[A-Za-z_]\w*\s*;", chunk.text))
+
+
+def _visible_contradiction_proves_safe(chunk: CodeChunk, context_text: str) -> bool:
+    combined = "\n".join(chunk.preprocessing_facts) + "\n" + context_text
+    return "branch contradiction:" in combined.lower() or "assertion-proven range:" in combined.lower()
+
+
+def _struct_extent_proves_visible_access_safe(chunk: CodeChunk, context_text: str) -> bool:
+    extents: dict[str, int] = {}
+    for line in context_text.splitlines():
+        match = re.search(r"struct field extent:\s*([A-Za-z_]\w*)\.([A-Za-z_]\w*)\[(\d+)\]", line, flags=re.IGNORECASE)
+        if match:
+            extents[match.group(2)] = int(match.group(3))
+    if not extents:
+        return False
+
+    for field_name, extent in extents.items():
+        max_index = -1
+        for offset_text in re.findall(rf"->\s*{re.escape(field_name)}\s*\[\s*(\d+)\s*\]", chunk.text):
+            max_index = max(max_index, int(offset_text))
+        memcpy_re = re.compile(
+            rf"&[A-Za-z_]\w*->\s*{re.escape(field_name)}\s*\[\s*(\d+)\s*\]\s*,\s*([^)]+)\)",
+            re.MULTILINE,
+        )
+        for offset_text, length_text in memcpy_re.findall(chunk.text):
+            normalized_len = length_text.strip()
+            if normalized_len.isdigit():
+                max_index = max(max_index, int(offset_text) + int(normalized_len) - 1)
+        if max_index >= 0 and max_index < extent:
+            return True
+    return False
 
 
 def normalize_cwe_and_apply_local_evidence_gate(
@@ -462,6 +682,9 @@ def _deterministic_fact_counts(chunk: CodeChunk) -> dict[str, int]:
         "array extent": 0,
         "integer type": 0,
         "assertion-proven range": 0,
+        "struct field extent": 0,
+        "sink extent": 0,
+        "branch contradiction": 0,
     }
     for line in chunk.preprocessing_facts:
         normalized = line.strip()
@@ -487,7 +710,10 @@ def append_ast_chunker_section(path: Path, *, chunk: CodeChunk) -> None:
             f"`fixed-size write={counts['fixed-size write']}, "
             f"array extent={counts['array extent']}, "
             f"integer type={counts['integer type']}, "
-            f"assertion-proven range={counts['assertion-proven range']}`"
+            f"assertion-proven range={counts['assertion-proven range']}, "
+            f"struct field extent={counts['struct field extent']}, "
+            f"sink extent={counts['sink extent']}, "
+            f"branch contradiction={counts['branch contradiction']}`"
         ),
         f"- Boundary confidence: `{chunk.boundary_confidence}`",
         "",
@@ -525,6 +751,12 @@ def print_processing_stats(
     total_exchange_time_sec: float,
     exchange_count: int,
     total_processing_time_sec: float,
+    unresolved_chunks: int = 0,
+    retrieval_rounds_used: int = 0,
+    parse_failures: int = 0,
+    suppressed_by_caller_bounds: int = 0,
+    suppressed_by_struct_extent: int = 0,
+    suppressed_by_contradiction: int = 0,
 ) -> None:
     total_seconds = int(max(0.0, total_processing_time_sec))
     hours, rem = divmod(total_seconds, 3600)
@@ -537,6 +769,12 @@ def print_processing_stats(
     print("Processing stats")
     print(f"successfully_processed_chunks_functions: {successful_chunks}")
     print(f"failed_chunks_functions: {failed_chunks}")
+    print(f"unresolved_chunks: {unresolved_chunks}")
+    print(f"retrieval_rounds_used: {retrieval_rounds_used}")
+    print(f"parse_failures: {parse_failures}")
+    print(f"suppressed_by_caller_bounds: {suppressed_by_caller_bounds}")
+    print(f"suppressed_by_struct_extent: {suppressed_by_struct_extent}")
+    print(f"suppressed_by_contradiction: {suppressed_by_contradiction}")
     print(f"average_tokens_per_second: {avg_tokens_per_sec:.2f}")
     print(f"average_exchange_time_sec: {avg_exchange_time:.3f}")
     print(f"total_processing_time_sec: {total_processing_time_sec:.3f}")

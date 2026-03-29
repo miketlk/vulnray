@@ -5,9 +5,9 @@ from vulnllm.config import Config
 from vulnllm.prompt.focus_injector import build_focus_block
 from vulnllm.prompt.profiles.embedded_c import EMBEDDED_C_GUIDANCE
 
-SYSTEM_PROMPT_SINGLE_PASS = """
+SYSTEM_PROMPT_DETECTION = """
 You are a vulnerability detection model for C/C++ code.
-Analyze one target function with optional helper context.
+Analyze one target function with decisive context only.
 Input sections are separated by:
 - // context
 - // target function
@@ -15,25 +15,41 @@ Input sections are separated by:
 Output format (plain text, exactly these keys):
 #judge: yes|no
 #type: CWE-xx|N/A
-#confidence: low|medium|high
-#need_context: N/A|symbol_a,symbol_b
 #why: one short sentence
 
 Rules:
-- When judge=yes, output one or more vulnerability types in #type.
-  If reporting multiple, separate entries with commas (for example: CWE-120, CWE-22).
-- If judge=no, set type=N/A.
-- Keep #why concise and evidence-grounded.
-- If a Contract Summary is present in context, treat it as high-priority evidence.
-- If issue depends on unseen callee internals, set #judge: no and request symbols via #need_context.
-- Report CWE-190 only when overflow is demonstrable from visible bounds/constants/call-path values; otherwise set #judge: no.
-- Do not flag a vulnerability in the target function based only on hypothetical caller misuse when the shown call path is safe.
+- If judge=yes, #type must contain only CWE values from Allowed CWE policy.
+- If judge=no, set #type: N/A.
+- Keep #why short and evidence-grounded.
+- Do not guess based only on hypothetical caller misuse.
 - Use sink-matched CWE mapping:
   - strcpy/strcat/gets into fixed buffer -> CWE-120
   - sprintf into fixed buffer -> CWE-787
   - unvalidated file path composition/open -> CWE-22
-- Do not output CWE-78 unless command execution APIs are present (system/popen/exec*).
-- Do not output CWE-190 for pure string/path handling functions without relevant numeric arithmetic.
+- Report CWE-190 only when arithmetic overflow is visible from shown code and facts.
+- Do not output JSON, markdown fences, or extra prose.
+""".strip()
+
+SYSTEM_PROMPT_SUFFICIENCY = """
+You are a vulnerability detection model for C/C++ code.
+Decide whether the shown context is sufficient to judge the target function.
+Input sections are separated by:
+- // context
+- // target function
+
+Output format (plain text, exactly these keys):
+#judge: yes|no
+#function: N/A|symbol_a,symbol_b
+
+Rules:
+- If context is sufficient, output:
+  #judge: yes
+  #function: N/A
+- If context is insufficient, output:
+  #judge: no
+  #function: exact symbol or type names needed, separated by commas
+- Request at most 2 symbols.
+- Prefer exact function or type names already visible in the code/context.
 - Do not output JSON, markdown fences, or extra prose.
 """.strip()
 
@@ -138,24 +154,60 @@ def _strip_c_comments(text: str) -> str:
     return "".join(collapsed)
 
 
-def build_prompt(cfg: Config, chunk: CodeChunk, index_context: str = "") -> str:
+def _fact_priority(line: str) -> tuple[int, str]:
+    normalized = line.strip().lstrip("-").strip().lower()
+    if normalized.startswith("struct field extent:"):
+        return (0, normalized)
+    if normalized.startswith("sink extent:"):
+        return (1, normalized)
+    if normalized.startswith("assertion-proven range:"):
+        return (2, normalized)
+    if normalized.startswith("branch contradiction:"):
+        return (3, normalized)
+    if normalized.startswith("fixed-size write:"):
+        return (4, normalized)
+    if normalized.startswith("array extent:"):
+        return (5, normalized)
+    if normalized.startswith("integer type:"):
+        return (8, normalized)
+    return (6, normalized)
+
+
+def _rank_preprocessing_facts(facts: tuple[str, ...], *, limit: int = 8) -> list[str]:
+    return sorted(facts, key=_fact_priority)[:limit]
+
+
+def build_prompt(
+    cfg: Config,
+    chunk: CodeChunk,
+    index_context: str = "",
+    allowed_cwe_policy: tuple[str, ...] = (),
+    *,
+    prompt_kind: str = "detection",
+) -> str:
     profile = EMBEDDED_C_GUIDANCE if cfg.prompt.profile == "embedded-c" else ""
     focus = build_focus_block(cfg.prompt.focus, cfg.prompt.prompt_file)
     metadata = (
         f"file={chunk.file}, lines={chunk.start_line}-{chunk.end_line}, "
         f"function={chunk.function or 'N/A'}, mode={cfg.scan.mode}"
     )
-    system_prompt = SYSTEM_PROMPT_SINGLE_PASS
+    if prompt_kind == "sufficiency":
+        system_prompt = SYSTEM_PROMPT_SUFFICIENCY
+    else:
+        system_prompt = SYSTEM_PROMPT_DETECTION
     parts = [system_prompt, profile]
     if focus:
         parts.append(focus)
     parts.append("Chunk metadata: " + metadata)
     context_sections: list[str] = []
-    if chunk.preprocessing_facts:
+    ranked_facts = _rank_preprocessing_facts(chunk.preprocessing_facts)
+    if ranked_facts:
         context_sections.append("Deterministic facts:")
-        context_sections.extend(chunk.preprocessing_facts)
+        context_sections.extend(ranked_facts)
     if index_context.strip():
         context_sections.append(index_context.strip())
+    if allowed_cwe_policy:
+        context_sections.append("Allowed CWE policy: " + ", ".join(allowed_cwe_policy))
     context_lines = [line for section in context_sections for line in section.splitlines()]
     deduped_lines: list[str] = []
     seen_lines: set[str] = set()

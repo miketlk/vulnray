@@ -110,12 +110,12 @@ def append_json_finding(path: Path, finding: Finding, *, include_reasoning: bool
         out.write(prefix + item_json + "\n")
 
 
-def append_json_summary(path: Path, findings: list[Finding]) -> None:
+def append_json_summary(path: Path, findings: list[Finding], *, telemetry: dict[str, int] | None = None) -> None:
     _strip_final_summary_if_present(path)
     last = _last_non_whitespace_char(path)
     if last not in {"[", "}"}:
         raise ValueError(f"Invalid incremental JSON report layout: {path}")
-    summary_json = json.dumps(build_summary(findings), indent=2)
+    summary_json = json.dumps(build_summary(findings, telemetry=telemetry), indent=2)
     summary_lines = summary_json.splitlines()
     summary_block = ['  "summary": ' + summary_lines[0]]
     for line in summary_lines[1:]:
@@ -133,8 +133,9 @@ def write_json_report(
     chunks_analyzed: int,
     findings: list[Finding],
     include_reasoning: bool = True,
+    telemetry: dict[str, int] | None = None,
 ) -> None:
     init_json_report(path, cfg, repo_root, files_scanned, chunks_analyzed)
     for f in findings:
         append_json_finding(path, f, include_reasoning=include_reasoning)
-    append_json_summary(path, findings)
+    append_json_summary(path, findings, telemetry=telemetry)

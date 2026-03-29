@@ -9,10 +9,12 @@ from vulnllm.cli_logic import (
     append_inference_metadata_section,
     append_output_section,
     append_prompt_section,
+    apply_compact_acceptance_gates,
     apply_phase15_acceptance_gates,
     approx_tokens,
     backend_name_and_version,
     build_chunks,
+    candidate_cwe_policy_for_chunk,
     collect_outputs,
     fenced_text_block,
     heuristic_fallback_findings,
@@ -48,7 +50,9 @@ def _finding(chunk: CodeChunk, vuln_type: str = "CWE-120") -> Finding:
 def test_cli_logic_has_explicit_public_api():
     assert "run_llm_inference_test" in cli_logic_all
     assert "normalize_cwe_and_apply_local_evidence_gate" in cli_logic_all
+    assert "candidate_cwe_policy_for_chunk" in cli_logic_all
     assert "print_processing_stats" in cli_logic_all
+    assert "apply_compact_acceptance_gates" in cli_logic_all
 
 
 def test_approx_tokens_and_backend_name_and_version():
@@ -169,6 +173,122 @@ def test_finding_normalization_and_gates():
     sufficiency, score = non_llm_context_sufficiency(chunk, "ctx")
     assert sufficiency == "sufficient"
     assert score >= 2
+
+
+def test_candidate_cwe_policy_for_chunk_selects_bounded_policy():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=6,
+        function="write_user_file",
+        text=(
+            "void write_user_file(const char *relative_path) {\n"
+            "  char buf[32];\n"
+            "  strcpy(buf, relative_path);\n"
+            '  FILE *fp = fopen(relative_path, "r");\n'
+            "  return;\n"
+            "}\n"
+        ),
+    )
+    policy = candidate_cwe_policy_for_chunk(chunk)
+    assert "CWE-120" in policy
+    assert "CWE-787" in policy
+    assert "CWE-22" in policy
+    assert "N/A" in policy
+
+
+def test_acceptance_gate_drops_findings_outside_allowed_policy():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="mul",
+        text="int mul(int a, int b) { return a * b; }",
+    )
+    f = _finding(chunk, "CWE-22")
+    f.context_sufficiency = "sufficient"
+    gated = apply_phase15_acceptance_gates(
+        [f],
+        chunk=chunk,
+        base_index_context="ctx",
+        allowed_cwe_policy=("CWE-190", "N/A"),
+    )
+    assert gated == []
+
+
+def test_acceptance_gate_drops_model_marked_insufficient_context():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="copy_name",
+        text="void copy_name(char *dst, const char *src) { strcpy(dst, src); }",
+    )
+    f = _finding(chunk, "CWE-120")
+    f.context_sufficiency = "insufficient"
+    gated = apply_phase15_acceptance_gates([f], chunk=chunk, base_index_context="ctx")
+    assert gated == []
+
+
+def test_acceptance_gate_suppresses_helper_when_caller_budget_proves_safe():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="buffer_append",
+        text="void buffer_append(char *dst, const char *src) { strcpy(dst, src); }",
+    )
+    f = _finding(chunk, "CWE-120")
+    f.context_sufficiency = "sufficient"
+    base_index_context = (
+        "Top callers:\n"
+        "- nonce_function_rfc6979\n"
+        "Call path context (up to 3):\n"
+        "- Path 1: main -> nonce_function_rfc6979 -> buffer_append\n"
+        "Caller write-budget summaries:\n"
+        "- caller=nonce_function_rfc6979, destination=keydata, destination_extent=112, maximum_cumulative_write=64\n"
+    )
+    gated = apply_phase15_acceptance_gates([f], chunk=chunk, base_index_context=base_index_context)
+    assert gated == []
+
+
+def test_compact_acceptance_gate_suppresses_struct_extent_safe_access():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=4,
+        function="secp256k1_ecdsa_recoverable_signature_load",
+        text="void f(sig_t *sig) { memcpy(&sig->data[0], src, 65); }",
+    )
+    f = _finding(chunk, "CWE-120")
+    gated, counters = apply_compact_acceptance_gates(
+        [f],
+        chunk=chunk,
+        context_text="Deterministic facts:\n- struct field extent: sig.data[65]",
+    )
+
+    assert gated == []
+    assert counters["suppressed_by_struct_extent"] == 1
+
+
+def test_compact_acceptance_gate_suppresses_contradicted_overflow():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=4,
+        function="bounded_mul",
+        text="int bounded_mul(int a, int b) { return a * b; }",
+        preprocessing_facts=["assertion-proven range: a <= 32 and b <= 32"],
+    )
+    f = _finding(chunk, "CWE-190")
+    gated, counters = apply_compact_acceptance_gates(
+        [f],
+        chunk=chunk,
+        context_text="Nearby checks:\n- assertion-proven range: a <= 32 and b <= 32",
+    )
+
+    assert gated == []
+    assert counters["suppressed_by_contradiction"] == 1
 
 
 def test_heuristic_fallback_findings_detects_multiple_types():

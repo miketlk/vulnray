@@ -118,7 +118,40 @@ def test_build_prompt_uses_compact_single_pass_contract_by_default():
 
     assert "#judge: yes|no" in prompt
     assert "#type: CWE-xx|N/A" in prompt
+    assert "#why: one short sentence" in prompt
     assert "BEGIN_FINDINGS_JSON" not in prompt
+
+
+def test_build_prompt_supports_minimal_sufficiency_contract():
+    cfg = Config(path=".")
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="foo",
+        text="int foo(void) { return 0; }\n",
+    )
+
+    prompt = build_prompt(cfg, chunk, index_context="", prompt_kind="sufficiency")
+
+    assert "#judge: yes|no" in prompt
+    assert "#function: N/A|symbol_a,symbol_b" in prompt
+    assert "#type: CWE-xx|N/A" not in prompt
+
+
+def test_build_prompt_includes_allowed_cwe_policy_when_provided():
+    cfg = Config(path=".")
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="foo",
+        text="int foo(void) { return 0; }\n",
+    )
+
+    prompt = build_prompt(cfg, chunk, index_context="", allowed_cwe_policy=("CWE-120", "CWE-787", "N/A"))
+
+    assert "Allowed CWE policy: CWE-120, CWE-787, N/A" in prompt
 
 
 def test_build_prompt_places_preprocessing_facts_before_target_function():

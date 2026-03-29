@@ -57,6 +57,28 @@ def test_ast_parse_c_family_detects_unbounded_fixed_buffer_sinks():
     assert any("strcpy to path without explicit bound" in line for line in lines)
 
 
+def test_ast_parse_c_family_extracts_struct_sink_and_branch_facts():
+    source = (
+        "typedef struct {\n"
+        "  unsigned char data[65];\n"
+        "} recoverable_sig;\n"
+        "int fill(recoverable_sig *sig, const unsigned char *src, int offset, int len) {\n"
+        "  unsigned char keydata[112];\n"
+        "  if (len < 64 - offset) {\n"
+        "    memcpy(keydata + offset, src, len);\n"
+        "    memcpy(sig->data + offset, src, len);\n"
+        "  }\n"
+        "  return 0;\n"
+        "}\n"
+    )
+    parsed = ast_parse_c_family(source, preferred_backend="regex")
+    lines = build_facts_lines(parsed.facts)
+
+    assert any("struct field extent: recoverable_sig.data[65]" in line for line in lines)
+    assert any("sink extent: memcpy destination=keydata+offset, destination_extent=112, maximum_cumulative_write=offset + len" in line for line in lines)
+    assert any("branch contradiction: branch condition constrains sink-related range: len < 64 - offset" in line for line in lines)
+
+
 def test_ast_parse_c_family_fallbacks_when_requested_backend_unavailable(monkeypatch):
     monkeypatch.setattr(
         "vulnllm.preprocessing.c_family._discover_support",

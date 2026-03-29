@@ -5,9 +5,9 @@ from collections import Counter
 from vulnllm.findings.model import Finding
 
 
-def build_summary(findings: list[Finding]) -> dict:
-    c = Counter([f.severity for f in findings if f.vulnerability_type != "ParserError"])
-    return {
+def build_summary(findings: list[Finding], telemetry: dict[str, int] | None = None) -> dict:
+    c = Counter([f.severity for f in findings])
+    summary = {
         "total_findings": sum(c.values()),
         "by_severity": {
             "critical": c.get("critical", 0),
@@ -16,3 +16,6 @@ def build_summary(findings: list[Finding]) -> dict:
             "low": c.get("low", 0),
         },
     }
+    if telemetry:
+        summary["telemetry"] = {k: int(v) for k, v in telemetry.items()}
+    return summary

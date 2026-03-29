@@ -37,6 +37,15 @@ class FunctionDeclaration:
     declaration: str
 
 
+@dataclass(frozen=True)
+class TypeDefinition:
+    name: str
+    file: str
+    start_line: int
+    end_line: int
+    source: str
+
+
 @dataclass
 class FileIndex:
     includes: list[str] = field(default_factory=list)
@@ -49,6 +58,7 @@ class ProjectIndex:
     symbols: SymbolTable = field(default_factory=SymbolTable)
     declarations: dict[str, list[FunctionDeclaration]] = field(default_factory=dict)
     definitions: dict[str, list[FunctionDefinition]] = field(default_factory=dict)
+    type_definitions: dict[str, list[TypeDefinition]] = field(default_factory=dict)
     callers: dict[str, list[str]] = field(default_factory=dict)
     callees: dict[str, list[str]] = field(default_factory=dict)
     assertion_map: dict[str, list[str]] = field(default_factory=dict)
@@ -73,68 +83,64 @@ class ProjectIndex:
             snippet += "\n..."
         return f"{name} ({fn.file}:{fn.start_line})\n{snippet}"
 
+    def get_symbol_definition(self, name: str, *, max_lines: int = 24) -> str:
+        function_def = self.get_function_definition(name, max_lines=max_lines)
+        if function_def:
+            return function_def
+        defs = self.type_definitions.get(name, [])
+        if not defs:
+            return ""
+        typedef = defs[0]
+        lines = typedef.source.splitlines()
+        snippet = "\n".join(lines[:max_lines]).strip()
+        if len(lines) > max_lines:
+            snippet += "\n..."
+        return f"{name} ({typedef.file}:{typedef.start_line})\n{snippet}"
+
     def build_context_packet(self, function_name: str, *, current_file: str | None = None) -> str:
         packet_lines: list[str] = []
+        fact_budget = 12
 
         decl = self._nearest_declaration(function_name, current_file=current_file)
         if decl is not None:
             packet_lines.append("Nearest declaration:")
             packet_lines.append(f"- {decl.file}:{decl.line} {decl.declaration}")
+            fact_budget -= 1
 
         callers = self.callers.get(function_name, [])[:3]
-        if callers:
-            packet_lines.append("Top callers:")
-            for caller in callers:
-                refs = self.query_symbol(caller)
-                loc = f" ({refs[0][0]}:{refs[0][1]})" if refs else ""
-                packet_lines.append(f"- {caller}{loc}")
+        caller_summaries = self._caller_write_budget_summaries(function_name, callers)
+        if caller_summaries and fact_budget > 0:
+            packet_lines.append("Caller write-budget summaries:")
+            packet_lines.extend(caller_summaries[:1])
+            fact_budget -= 1
 
-        callees = self.callees.get(function_name, [])[:5]
-        if callees:
-            packet_lines.append("Direct callees:")
+        deterministic = self._rank_deterministic_facts(self.deterministic_facts.get(function_name, []))
+        if deterministic and fact_budget > 0:
+            packet_lines.append("Deterministic facts:")
+            for fact in deterministic[: max(0, fact_budget)]:
+                packet_lines.append(f"- {fact.lstrip('- ').strip()}")
+            fact_budget -= min(len(deterministic), fact_budget)
+
+        nearby_checks = self._rank_nearby_checks(function_name)
+        if nearby_checks and fact_budget > 0:
+            packet_lines.append("Nearby checks:")
+            for fact in nearby_checks[: max(0, fact_budget)]:
+                packet_lines.append(f"- {fact}")
+            fact_budget -= min(len(nearby_checks), fact_budget)
+
+        callees = self.callees.get(function_name, [])[:2]
+        if callees and fact_budget > 0:
+            packet_lines.append("Relevant callees:")
             for callee in callees:
                 refs = self.query_symbol(callee)
                 loc = f" ({refs[0][0]}:{refs[0][1]})" if refs else ""
                 packet_lines.append(f"- {callee}{loc}")
-
-        assertion_facts = self.assertion_map.get(function_name, [])
-        if assertion_facts:
-            packet_lines.append("Assertion facts:")
-            for fact in assertion_facts[:6]:
-                packet_lines.append(f"- {fact}")
-
-        local_ranges = self.range_facts.get(function_name, [])
-        if local_ranges:
-            packet_lines.append("Local size/range facts:")
-            for fact in local_ranges[:6]:
-                packet_lines.append(f"- {fact}")
-
-        deterministic = self.deterministic_facts.get(function_name, [])
-        if deterministic:
-            packet_lines.append("Deterministic facts:")
-            for fact in deterministic[:8]:
-                packet_lines.append(f"- {fact.lstrip('- ').strip()}")
-
-        contract_summary = self._build_contract_summary(function_name)
-        if contract_summary:
-            packet_lines.append("Contract Summary:")
-            packet_lines.extend(contract_summary)
-
-        macro_facts = self._macro_context(function_name)
-        if macro_facts:
-            packet_lines.append("Macro snippets:")
-            for fact in macro_facts:
-                packet_lines.append(f"- {fact}")
+            fact_budget -= min(2, len(callees))
 
         paths = self.call_paths.get(function_name, [])[:3]
-        if paths:
+        if paths and fact_budget > 0:
             packet_lines.append("Call path context (up to 3):")
-            for idx, path in enumerate(paths, start=1):
-                packet_lines.append(f"- Path {idx}: {' -> '.join(path)}")
-            snippets = self._path_function_snippets(function_name, paths)
-            if snippets:
-                packet_lines.append("Path implementation snippets:")
-                packet_lines.extend(snippets)
+            packet_lines.append(f"- Path 1: {' -> '.join(paths[0])}")
 
         return "\n".join(packet_lines).strip()
 
@@ -207,6 +213,46 @@ class ProjectIndex:
                     return selected
         return selected
 
+    @staticmethod
+    def _rank_deterministic_facts(facts: list[str]) -> list[str]:
+        def score(line: str) -> tuple[int, str]:
+            normalized = line.strip().lower()
+            if normalized.startswith("struct field extent:"):
+                return (0, normalized)
+            if normalized.startswith("sink extent:"):
+                return (1, normalized)
+            if normalized.startswith("assertion-proven range:"):
+                return (2, normalized)
+            if normalized.startswith("branch contradiction:"):
+                return (3, normalized)
+            if normalized.startswith("fixed-size write:"):
+                return (4, normalized)
+            if normalized.startswith("array extent:"):
+                return (5, normalized)
+            if normalized.startswith("integer type:"):
+                return (8, normalized)
+            return (6, normalized)
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for fact in sorted(facts, key=score):
+            if fact in seen:
+                continue
+            seen.add(fact)
+            deduped.append(fact)
+        return deduped
+
+    def _rank_nearby_checks(self, function_name: str) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for source in (self.assertion_map.get(function_name, []), self.range_facts.get(function_name, [])):
+            for fact in source:
+                if fact in seen:
+                    continue
+                seen.add(fact)
+                out.append(fact)
+        return out[:3]
+
     def _macro_context(self, function_name: str) -> list[str]:
         defs = self.definitions.get(function_name, [])
         if not defs:
@@ -229,6 +275,61 @@ class ProjectIndex:
                 break
         return deduped
 
+    def _caller_write_budget_summaries(self, function_name: str, callers: list[str]) -> list[str]:
+        summaries: list[str] = []
+        for caller in callers:
+            defs = self.definitions.get(caller, [])
+            if not defs:
+                continue
+            caller_def = defs[0]
+            arrays = {name: size for name, size in ARRAY_RE.findall(caller_def.source)}
+            call_re = re.compile(rf"\b{re.escape(function_name)}\s*\(([^)]*)\)")
+            for match in call_re.finditer(caller_def.source):
+                args = split_args(match.group(1))
+                if not args:
+                    continue
+                destination_expr = args[0].strip()
+                destination_name = destination_expr.lstrip("&").strip()
+                destination_extent = self._destination_extent(destination_name, arrays, caller_def.source)
+                max_write = self._max_write_from_args(args, arrays)
+                if destination_extent is None or max_write is None:
+                    continue
+                summaries.append(
+                    f"- caller={caller}, destination={destination_name}, "
+                    f"destination_extent={destination_extent}, maximum_cumulative_write={max_write}"
+                )
+                if len(summaries) >= 6:
+                    return summaries
+        return summaries
+
+    @staticmethod
+    def _destination_extent(destination_name: str, arrays: dict[str, str], caller_source: str) -> int | None:
+        direct = arrays.get(destination_name)
+        if direct and direct.isdigit():
+            return int(direct)
+        sizeof_match = re.search(rf"\bsizeof\s*\(\s*{re.escape(destination_name)}\s*\)", caller_source)
+        if sizeof_match and direct and direct.isdigit():
+            return int(direct)
+        return None
+
+    @staticmethod
+    def _max_write_from_args(args: list[str], arrays: dict[str, str]) -> int | None:
+        numeric_values: list[int] = []
+        for arg in args[1:]:
+            token = arg.strip()
+            if token.isdigit():
+                numeric_values.append(int(token))
+                continue
+            sizeof_m = re.fullmatch(r"sizeof\s*\(\s*([A-Za-z_]\w*)\s*\)", token)
+            if sizeof_m:
+                ref = sizeof_m.group(1)
+                size = arrays.get(ref)
+                if size and size.isdigit():
+                    numeric_values.append(int(size))
+        if not numeric_values:
+            return None
+        return max(numeric_values)
+
 
 def build_project_index(files: list[Path], root: Path) -> ProjectIndex:
     idx = ProjectIndex()
@@ -249,6 +350,10 @@ def build_project_index(files: list[Path], root: Path) -> ProjectIndex:
 
         for decl in _extract_function_declarations(lines, rel):
             idx.declarations.setdefault(decl.name, []).append(decl)
+
+        for typedef in _extract_type_definitions(text, rel):
+            idx.type_definitions.setdefault(typedef.name, []).append(typedef)
+            idx.symbols.add(typedef.name, typedef.file, typedef.start_line)
 
         for chunk in chunks:
             if not chunk.function:
@@ -404,3 +509,33 @@ def _guess_origin(name: str, ptype: str) -> str:
     if "const" in ptype:
         return "read-only"
     return "unknown"
+
+
+def _extract_type_definitions(text: str, rel: str) -> list[TypeDefinition]:
+    out: list[TypeDefinition] = []
+    typedef_re = re.compile(r"\btypedef\s+struct\s*(?:[A-Za-z_]\w*)?\s*\{.*?\}\s*([A-Za-z_]\w*)\s*;", re.DOTALL)
+    struct_re = re.compile(r"\bstruct\s+([A-Za-z_]\w*)\s*\{.*?\}\s*;", re.DOTALL)
+
+    for match in typedef_re.finditer(text):
+        name = match.group(1)
+        source = match.group(0).strip()
+        start_line = text.count("\n", 0, match.start()) + 1
+        end_line = start_line + source.count("\n")
+        out.append(TypeDefinition(name=name, file=rel, start_line=start_line, end_line=end_line, source=source))
+
+    for match in struct_re.finditer(text):
+        name = match.group(1)
+        source = match.group(0).strip()
+        start_line = text.count("\n", 0, match.start()) + 1
+        end_line = start_line + source.count("\n")
+        out.append(TypeDefinition(name=name, file=rel, start_line=start_line, end_line=end_line, source=source))
+
+    deduped: list[TypeDefinition] = []
+    seen: set[tuple[str, int]] = set()
+    for item in out:
+        key = (item.name, item.start_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
