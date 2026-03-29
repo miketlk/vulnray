@@ -25,6 +25,7 @@ from vulnllm.cli_logic import (
     print_processing_stats,
     prompt_output_log_path,
     run_llm_inference_test,
+    secondary_cwe_candidates_for_chunk,
 )
 from vulnllm.config import Config
 from vulnllm.findings.model import Finding
@@ -53,6 +54,7 @@ def test_cli_logic_has_explicit_public_api():
     assert "candidate_cwe_policy_for_chunk" in cli_logic_all
     assert "print_processing_stats" in cli_logic_all
     assert "apply_compact_acceptance_gates" in cli_logic_all
+    assert "secondary_cwe_candidates_for_chunk" in cli_logic_all
 
 
 def test_approx_tokens_and_backend_name_and_version():
@@ -195,6 +197,27 @@ def test_candidate_cwe_policy_for_chunk_selects_bounded_policy():
     assert "CWE-787" in policy
     assert "CWE-22" in policy
     assert "N/A" in policy
+
+
+def test_secondary_cwe_candidates_focuses_on_other_visible_sink_families():
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=6,
+        function="write_user_file",
+        text=(
+            "void write_user_file(const char *relative_path) {\n"
+            "  char buf[64];\n"
+            '  sprintf(buf, "%s/%s", "./data", relative_path);\n'
+            '  FILE *fp = fopen(buf, "w");\n'
+            "}\n"
+        ),
+    )
+    existing = [_finding(chunk, "CWE-787")]
+
+    followups = secondary_cwe_candidates_for_chunk(chunk, existing_findings=existing)
+
+    assert followups == ("CWE-22",)
 
 
 def test_acceptance_gate_drops_findings_outside_allowed_policy():

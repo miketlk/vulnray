@@ -54,6 +54,23 @@ Rules:
 """.strip()
 
 
+def _targeted_cwe_instruction(allowed_cwe_policy: tuple[str, ...]) -> str:
+    cwes = [cwe.upper() for cwe in allowed_cwe_policy if cwe.upper().startswith("CWE-")]
+    if len(cwes) != 1:
+        return ""
+    target = cwes[0]
+    return (
+        f"Targeted follow-up check: decide only whether {target} is present in the target function.\n"
+        f"- If {target} is present, output:\n"
+        "  #judge: yes\n"
+        f"  #type: {target}\n"
+        "- If it is not present, output:\n"
+        "  #judge: no\n"
+        "  #type: N/A\n"
+        "- Ignore other vulnerability classes during this follow-up check."
+    )
+
+
 def _as_comment_block(text: str) -> str:
     lines = text.splitlines() or ["N/A"]
     return "\n".join("// " + line if line else "//" for line in lines)
@@ -196,6 +213,9 @@ def build_prompt(
     else:
         system_prompt = SYSTEM_PROMPT_DETECTION
     parts = [system_prompt, profile]
+    targeted_instruction = _targeted_cwe_instruction(allowed_cwe_policy) if prompt_kind == "detection" else ""
+    if targeted_instruction:
+        parts.append(targeted_instruction)
     if focus:
         parts.append(focus)
     parts.append("Chunk metadata: " + metadata)

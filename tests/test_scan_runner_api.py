@@ -217,3 +217,40 @@ def test_run_scan_records_unresolved_chunk_telemetry(tmp_path: Path):
     assert payload["summary"]["total_findings"] == 0
     assert payload["summary"]["telemetry"]["unresolved_chunks"] == 1
     assert payload["summary"]["telemetry"]["retrieval_rounds_used"] == 0
+
+
+def test_run_scan_emits_secondary_finding_for_other_visible_sink_family(tmp_path: Path):
+    src = tmp_path / "main.c"
+    src.write_text(
+        "void write_user_file(const char *relative_path) {\n"
+        "    char path[64];\n"
+        "    sprintf(path, \"%s/%s\", \"./data\", relative_path);\n"
+        "    fopen(path, \"w\");\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    cfg = _cfg(tmp_path)
+    cfg.scan.function = "write_user_file"
+    calls = {"main_detection": 0, "followup_detection": 0}
+
+    class FakeBackend:
+        def __init__(self, _cfg):
+            pass
+
+        def generate(self, prompt, _params):
+            if "#function: N/A|symbol_a,symbol_b" in prompt:
+                return InferenceResult(text=_compact_sufficiency_yes(), error=None)
+            if "Allowed CWE policy: CWE-22, N/A" in prompt:
+                calls["followup_detection"] += 1
+                return InferenceResult(text=_compact_yes("CWE-22"), error=None)
+            calls["main_detection"] += 1
+            return InferenceResult(text=_compact_yes("CWE-787"), error=None)
+
+    rc = run_scan(cfg, root=tmp_path, files=[src], backend_factory=FakeBackend)
+
+    assert rc == 1
+    assert calls["main_detection"] == 1
+    assert calls["followup_detection"] == 1
+    payload = json.loads((tmp_path / "reports" / "scan.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["total_findings"] == 2
+    assert {finding["vulnerability_type"] for finding in payload["findings"]} == {"CWE-787", "CWE-22"}

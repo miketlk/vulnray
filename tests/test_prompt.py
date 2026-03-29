@@ -154,6 +154,23 @@ def test_build_prompt_includes_allowed_cwe_policy_when_provided():
     assert "Allowed CWE policy: CWE-120, CWE-787, N/A" in prompt
 
 
+def test_build_prompt_adds_targeted_followup_instruction_for_single_cwe_policy():
+    cfg = Config(path=".")
+    chunk = CodeChunk(
+        file="main.c",
+        start_line=1,
+        end_line=3,
+        function="write_user_file",
+        text="void write_user_file(const char *path) { fopen(path, \"w\"); }\n",
+    )
+
+    prompt = build_prompt(cfg, chunk, index_context="", allowed_cwe_policy=("CWE-22", "N/A"))
+
+    assert "Targeted follow-up check: decide only whether CWE-22 is present" in prompt
+    assert "#type: CWE-22" in prompt
+    assert "Ignore other vulnerability classes during this follow-up check." in prompt
+
+
 def test_build_prompt_places_preprocessing_facts_before_target_function():
     cfg = Config(path=".")
     chunk = CodeChunk(

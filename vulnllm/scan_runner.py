@@ -25,6 +25,7 @@ from vulnllm.cli_logic import (
     normalize_exploitability_classification,
     print_processing_stats,
     prompt_output_log_path,
+    secondary_cwe_candidates_for_chunk,
 )
 from vulnllm.findings.deduplicator import deduplicate_findings
 from vulnllm.findings.model import Finding, parse_findings_with_error, parse_sufficiency_decision
@@ -335,6 +336,63 @@ def run_scan(cfg, *, root: Path, files: list[Path], backend_factory) -> int:
             suppressed_by_caller_bounds += suppression_counts["suppressed_by_caller_bounds"]
             suppressed_by_struct_extent += suppression_counts["suppressed_by_struct_extent"]
             suppressed_by_contradiction += suppression_counts["suppressed_by_contradiction"]
+
+            followup_candidates = secondary_cwe_candidates_for_chunk(chunk, existing_findings=parsed_findings)
+            if parsed_findings and followup_candidates and next_id2 is not None:
+                for extra_cwe in followup_candidates:
+                    followup_prompt = build_prompt(
+                        cfg,
+                        chunk,
+                        index_context=context_text,
+                        allowed_cwe_policy=(extra_cwe, "N/A"),
+                        prompt_kind="detection",
+                    )
+                    followup_exchange = _run_exchange(
+                        followup_prompt,
+                        stage=f"detection-followup-{extra_cwe.lower()}",
+                        extra_events=[
+                            f"sufficiency_result={sufficiency_result}",
+                            f"retrieved_symbols={','.join(retrieved_symbols) if retrieved_symbols else 'N/A'}",
+                            f"followup_policy={extra_cwe}",
+                        ],
+                    )
+                    if followup_exchange is None or followup_exchange.error:
+                        continue
+
+                    extra_findings, next_id2_candidate, parse_error = parse_findings_with_error(
+                        followup_exchange.text,
+                        chunk,
+                        start_id=next_id2,
+                    )
+                    if parse_error:
+                        retry_result = _retry_once(
+                            followup_prompt,
+                            stage=f"detection-followup-{extra_cwe.lower()}",
+                            parse_error=parse_error,
+                        )
+                        if retry_result is None or retry_result.error:
+                            continue
+                        extra_findings, next_id2_candidate, parse_error = parse_findings_with_error(
+                            retry_result.text,
+                            chunk,
+                            start_id=next_id2,
+                        )
+                        if parse_error:
+                            continue
+
+                    extra_findings = normalize_exploitability_classification(extra_findings)
+                    extra_findings, extra_counts = apply_compact_acceptance_gates(
+                        extra_findings,
+                        chunk=chunk,
+                        context_text=context_text,
+                        allowed_cwe_policy=(extra_cwe, "N/A"),
+                    )
+                    suppressed_by_caller_bounds += extra_counts["suppressed_by_caller_bounds"]
+                    suppressed_by_struct_extent += extra_counts["suppressed_by_struct_extent"]
+                    suppressed_by_contradiction += extra_counts["suppressed_by_contradiction"]
+                    if extra_findings:
+                        parsed_findings.extend(extra_findings)
+                    next_id2 = next_id2_candidate
 
             if prompt_output_path is not None and (cfg.logging.log_prompts or cfg.logging.log_model_outputs):
                 with prompt_output_path.open("a", encoding="utf-8") as out:
